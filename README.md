@@ -57,7 +57,7 @@ desktop build, which the upstream README below describes.
 ### Releasing
 
 Every pull request is checked by `.github/workflows/pull-request.yml`. A release is started by hand:
-Actions, Release, Run workflow, on `gemmified`. It takes the version from the live feed and
+Actions, Release, Run workflow, on `downstream`. It takes the version from the live feed and
 increases the part you choose (patch by default), or takes an exact version. It builds the plugin
 as that version, uploads it, replaces the feed, and creates the `v<version>` tag and GitHub
 release. `package.json`'s version is only a placeholder, so there is never a version-bump commit.
@@ -65,10 +65,10 @@ release. `package.json`'s version is only a placeholder, so there is never a ver
 ## Relation to OpenGM
 
 This repository is a fork of [OpenGM](https://github.com/misternebula/OpenGM). Its default branch,
-`gemmified`, is a single commit on top of upstream commit
+`downstream`, is upstream commit
 [`a23f7ee`](https://github.com/misternebula/OpenGM/commit/a23f7eea78173f46a5f70eb36c0bd0f11004c7b2)
-(2026-07-14). `git diff a23f7eea gemmified` lists everything this fork changes. Upstream has newer
-commits that are not merged here. Here is a summary:
+(2026-07-14) plus this fork's changes. `git diff a23f7eea downstream` lists everything this fork
+changes. Upstream has newer commits that are not merged here. Here is a summary:
 
 - `OpenGM.Wasm` is new. It builds OpenGM's sources for `browser-wasm`, with WebGL2 rendering,
   Web Audio, keyboard and mouse input, and a virtual filesystem whose writes the host persists.
@@ -77,7 +77,7 @@ commits that are not merged here. Here is a summary:
 - `OpenGM.Tests` grows to cover them.
 - `host/` and `scripts/` are new. They are the plugin's entry module and the release tooling.
 - `UndertaleModTool` points at a [fork](https://github.com/QuentinJanuel/UndertaleModTool),
-  branch `gemmified`: upstream UndertaleModTool plus one logging change.
+  branch `downstream`: upstream UndertaleModTool plus one logging change.
 
 ## Licence
 
