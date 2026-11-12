@@ -3,11 +3,38 @@ using OpenGM.SerializedFiles;
 using OpenTK.Mathematics;
 
 namespace OpenGM;
+
 public static class TextManager
 {
     public static List<FontAsset> FontAssets = new();
 
-    public static FontAsset fontAsset = null!;
+    /// <summary>The font <c>draw_set_font</c> chose, or null when nothing has chosen one.</summary>
+    public static FontAsset? ChosenFont { get; private set; }
+
+    /// <summary>
+    /// The font text is drawn with.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Falls back to the game's first font rather than being null.</b> A real GameMaker runner
+    /// always has a font -- Studio's built-in default when the game has never called
+    /// <c>draw_set_font</c> -- so <c>draw_text</c> before any font is set draws in it. This used
+    /// to be a plain <c>null!</c> field, which made that same code take the engine down with a
+    /// NullReferenceException in <see cref="FontHeight"/>, from inside whatever event happened to
+    /// draw first. A game's own first font is not the default Studio would have used, but it is a
+    /// font, and text in the wrong typeface is a far smaller lie than a crash.
+    /// </para>
+    /// <para>
+    /// Still null for a game that carries no fonts at all, which is why the drawing paths check.
+    /// <see cref="ChosenFont"/> is what <c>draw_get_font</c> reports, so a 2.3 game asking whether
+    /// a font was set still gets -1 when none was.
+    /// </para>
+    /// </remarks>
+    public static FontAsset fontAsset
+    {
+        get => ChosenFont ?? FontAssets.FirstOrDefault()!;
+        set => ChosenFont = value;
+    }
 
     public static HAlign halign;
     public static VAlign valign;
@@ -19,6 +46,14 @@ public static class TextManager
 
     public static void DrawTextTransformed(double x, double y, string text, double xscale, double yscale, double angle)
     {
+        // Nothing to draw with: a game carrying no fonts at all. Silently drawing nothing is what
+        // the rest of this file already assumes (see the null checks below) and is the only thing
+        // left to do -- there is no glyph anywhere to fall back to.
+        if (fontAsset == null)
+        {
+            return;
+        }
+
         var c = SpriteManager.DrawColor.ABGRToCol4(SpriteManager.DrawAlpha);
         CustomWindow.Draw(new GMTextJob()
         {
@@ -30,176 +65,117 @@ public static class TextManager
             scale = new Vector2d(xscale, yscale),
             angle = angle,
             asset = fontAsset,
-            // gamemaker is weird
-            // "A value of -1 for the line separation argument will default to a separation based on the height of the "M" character in the chosen font."
+            // The default separation these paths have no argument to override -- see FontHeight.
             lineSep = FontHeight()
         });
     }
 
+    /// <summary>
+    /// The default distance between lines, i.e. what a line separation argument of -1 resolves to.
+    /// GM's manual describes this as "based on the height of the 'M' character", and this used to
+    /// take it literally -- but the runner actually uses the tallest glyph anywhere in the font
+    /// (OpenGMK's draw.rs: `None => font.tallest_char_height`, and TextHeight below is the same
+    /// measurement ported from the same place). Those only coincide for fonts whose 'M' happens to
+    /// be the tallest thing in them; anything with accents, descenders or tall punctuation is
+    /// taller, so lines were drawn overlapping their neighbours' descenders (Continuity's
+    /// dialogfont: 'M' is 20px against a 25px tallest glyph, a fifth too tight).
+    /// </summary>
     public static int FontHeight()
     {
-        if (fontAsset.entriesDict.TryGetValue('M', out var glyph))
+        var font = fontAsset;
+        if (font == null)
         {
-            return glyph.h;
+            return 0;
         }
 
-        return fontAsset.entries[0].h;
+        var tallest = 0;
+        foreach (var glyph in font.entries)
+        {
+            if (glyph.h > tallest)
+            {
+                tallest = glyph.h;
+            }
+        }
+
+        return tallest;
     }
 
-    // https://github.com/YoYoGames/GameMaker-HTML5/blob/develop/scripts/yyFont.js#L1797
-    public static List<string> SplitText(string str, int lineWidth, FontAsset font)
+    /// <summary>
+    /// The lines draw_text_ext and friends actually render: explicit newlines always break, and
+    /// anything wider than <paramref name="lineWidth"/> wraps at the last space that fits. A
+    /// negative width means no wrapping at all, matching GM's own documented default.
+    /// </summary>
+    public static string[] WrapText(string text, int lineWidth)
     {
-        if (lineWidth < 0)
+        var lines = text.SplitLines();
+
+        if (lineWidth < 0 || fontAsset == null)
         {
-            lineWidth = 10000000;
+            return lines;
         }
 
-        var whitespace = ' ';
-        var newline = '\n';
-        var newline2 = '\r';
+        var wrapped = new List<string>();
 
-        var splitLines = new List<string>();
-
-        var len = str.Length;
-        var pNew = str;
-        var lastChar = pNew[0];
-        var start = 0;
-        var end = 0;
-
-        while (start < len)
+        foreach (var line in lines)
         {
-            var total = 0;
+            var start = 0;
 
-            if (lineWidth == 10000000)
+            while (true)
             {
-                // If width < 0 (i.e. no wrapping required), then we DON'T strip spaces from the start... we just copy it!
-                // (sounds wrong.. but its what they do...)
+                var width = 0;
+                var end = start;
+                var lastFittingSpace = -1;
 
-                while (end < len && pNew[end] != newline && pNew[end] != newline2)
+                while (end < line.Length)
                 {
-                    end++;
-                    if (end < len)
-                    {
-                        lastChar = pNew[end];
-                    }
-                    else
-                    {
-                        lastChar = (char)0x0;
-                    }
-                }
+                    var charWidth = CharWidth(line[end]);
 
-                char c;
-                if (end < len)
-                {
-                    c = pNew[end];
-                }
-                else
-                {
-                    c = (char)0x0;
-                }
-
-                if ((newline == lastChar) && (newline2 == pNew[end]))
-                { end++; continue; } // ignore, we've already split the line
-
-                if ((newline2 == lastChar) && (newline == pNew[end]))
-                { end++; continue; } // ignore, we've already split the line
-
-                if (end == len)
-                {
-                    lastChar = (char)0;
-                }
-                else
-                {
-                    lastChar = pNew[end];
-                }
-                
-                splitLines.Add(pNew[start..end]);
-            }
-            else
-            {
-                // Skip leading whitespace
-                while (end < len && total < lineWidth)
-                {
-                    var c = pNew[end];
-                    if (pNew[end] != whitespace)
+                    // Always takes at least one character: a line narrower than a single glyph
+                    // would otherwise never advance.
+                    if (width + charWidth > lineWidth && end > start)
                     {
                         break;
                     }
 
-                    total += font.entriesDict[c].shift;
+                    if (line[end] == ' ')
+                    {
+                        lastFittingSpace = end;
+                    }
+
+                    width += charWidth;
                     end++;
                 }
 
-                // Loop through string and get the number of chars that will fit in the line.
-                while (end < len && total < lineWidth)
+                if (end == line.Length)
                 {
-                    var c = pNew[end];
-                    if (c == '\n')
-                    {
-                        break;
-                    }
-
-                    total += font.entriesDict[c].shift;
-                    end++;
+                    wrapped.Add(line[start..]);
+                    break;
                 }
 
-                // If we shot past the end, then move back a bit until we fit.
-                if (total > lineWidth)
+                // Break at the last space that fits, dropping the space itself. If what didn't fit
+                // IS the space, everything before it already fits, so break there rather than
+                // backtracking to the previous word. A word wider than the whole line has no space
+                // to break at at all, so break mid-word rather than stall.
+                var breakAt = line[end] == ' '
+                    ? end
+                    : lastFittingSpace > start ? lastFittingSpace : end;
+                wrapped.Add(line[start..breakAt]);
+                start = breakAt;
+
+                // A wrapped line doesn't begin with the run of spaces it broke on.
+                while (start < line.Length && line[start] == ' ')
                 {
-                    end--;
-                    total -= font.entriesDict[pNew[end]].shift;
+                    start++;
                 }
 
-                if (pNew[end] == '\n')
+                if (start >= line.Length)
                 {
-                    // END of line
-                    splitLines.Add(pNew[start..(end + 1)]);
-                }
-                else
-                {
-                    // NOT a new line, but we didn't move on... fatal error. Probably a single char doesn't even fit!
-                    if (end == start) return splitLines;
-
-                    // If we don't END on a "space", OR if the next character isn't a space AS WELL. 
-                    // then backtrack to the start of the last "word"
-                    if (end != len)
-                    {
-                        if ((pNew[end] != ' ') || (pNew[end] != ' ' && pNew[end + 1] != ' '))
-                        {
-                            var e = end;
-                            while (e < start)
-                            {
-                                if (pNew[--e] == ' ')
-                                    break;
-                            }
-
-                            if (e != start)
-                            {
-                                end = e;
-                            }
-                            else
-                            {
-                                while (pNew[end] != ' ' && end < len)
-                                    end++;
-                            }
-                        }
-                    }
-
-                    var _end = end;
-                    if (_end > start)
-                    {
-                        while (pNew[_end - 1] == ' ' && _end > 0)
-                            _end--;
-                    }
-
-                    if (_end != start)
-                        splitLines.Add(pNew[start..(end + 1)]);
+                    break;
                 }
             }
-            start = ++end;
         }
 
-        return splitLines;
+        return wrapped.ToArray();
     }
 
     public static double TextHeight(string text)
@@ -223,6 +199,66 @@ public static class TextManager
         }
     }
 
+    /// <summary>
+    /// Tallest glyph height on a single line (no embedded newlines). Split out from
+    /// <see cref="StringHeight"/> so callers that already have a line in hand (e.g. the per-line
+    /// text-draw loop) don't pay for a fresh <see cref="Extensions.SplitLines"/> allocation per
+    /// call just to measure one line -- see the batched measurement in CustomWindow.Draw(GMTextJob).
+    /// </summary>
+    public static int LineHeight(string line)
+    {
+        var tallestChar = 0;
+        foreach (var character in line)
+        {
+            if (!fontAsset.entriesDict.TryGetValue(character, out var glyph))
+            {
+                continue;
+            }
+
+            if (glyph.h > tallestChar)
+            {
+                tallestChar = glyph.h;
+            }
+        }
+
+        return tallestChar;
+    }
+
+    /// <summary>
+    /// How far one character advances the pen. Split out of <see cref="LineWidth"/> so
+    /// <see cref="WrapText"/> decides where to break using the exact same widths the text is then
+    /// measured and drawn with.
+    /// </summary>
+    public static int CharWidth(char character)
+    {
+        if (!fontAsset.entriesDict.TryGetValue(character, out Glyph? entry))
+        {
+            // offset sprite text for spaces
+            return fontAsset.IsSpriteFont() && character == ' ' ? (int)fontAsset.Size : 0;
+        }
+
+        var width = (int)(entry.shift * fontAsset.ScaleX);
+
+        if (fontAsset.IsSpriteFont())
+        {
+            width += (int)(fontAsset.sep * fontAsset.ScaleX);
+        }
+
+        return width;
+    }
+
+    /// <summary>Width of a single line (no embedded newlines). See <see cref="LineHeight"/>.</summary>
+    public static int LineWidth(string line)
+    {
+        var totalWidth = 0;
+        for (var i = 0; i < line.Length; i++)
+        {
+            totalWidth += CharWidth(line[i]);
+        }
+
+        return totalWidth;
+    }
+
     public static int StringHeight(string text)
     {
         // TODO : wtf is this?
@@ -230,23 +266,7 @@ public static class TextManager
         var lines = text.SplitLines();
 
         // get tallest character in last line
-        var tallestChar = 0;
-        foreach (var character in lines[^1])
-        {
-            if (!fontAsset.entriesDict.TryGetValue(character, out var glyph))
-            {
-                continue;
-            }
-
-            var height = glyph.h;
-
-            if (height > tallestChar)
-            {
-                tallestChar = height;
-            }
-        }
-
-        return ((lines.Length - 1) * FontHeight()) + tallestChar;
+        return ((lines.Length - 1) * FontHeight()) + LineHeight(lines[^1]);
     }
 
     public static int StringWidth(string text)
@@ -256,31 +276,10 @@ public static class TextManager
         var longestLine = 0;
         foreach (var line in lines)
         {
-            var totalWidth = 0;
-            for (var i = 0; i < line.Length; i++)
+            var width = LineWidth(line);
+            if (width > longestLine)
             {
-                var asciiIndex = (int)line[i];
-
-                if (!fontAsset.entriesDict.TryGetValue(asciiIndex, out Glyph? entry))
-                {
-                    // offset sprite text for spaces
-                    if (fontAsset.IsSpriteFont() && asciiIndex == ' ')
-                    {
-                        totalWidth += (int)fontAsset.Size;
-                    }
-                    continue;
-                }
-
-                totalWidth += (int)(entry.shift * fontAsset.ScaleX);
-                if (fontAsset.IsSpriteFont())
-                {
-                    totalWidth += (int)(fontAsset.sep * fontAsset.ScaleX);
-                }
-            }
-
-            if (totalWidth > longestLine)
-            {
-                longestLine = totalWidth;
+                longestLine = width;
             }
         }
 
@@ -299,8 +298,7 @@ public static class TextManager
             scale = Vector2.One,
             angle = 0,
             asset = fontAsset,
-            // gamemaker is weird
-            // "A value of -1 for the line separation argument will default to a separation based on the height of the "M" character in the chosen font."
+            // The default separation these paths have no argument to override -- see FontHeight.
             lineSep = FontHeight()
         });
     }

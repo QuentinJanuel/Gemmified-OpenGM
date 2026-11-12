@@ -115,9 +115,9 @@ namespace OpenGM
                         if (grid.Cells[i * grid.VCells + j] < 0)
                             continue;
 
-                        if (CollisionManager.Collision_Rectangle(inst, 
+                        if (CollisionManager.Collision_Rectangle(inst,
                                 grid.Left + i * grid.CellWidth,
-                                grid.Top + j * grid.CellHeight, 
+                                grid.Top + j * grid.CellHeight,
                                 grid.Left + (i + 1) * grid.CellWidth - 1,
                                 grid.Top + (j + 1) * grid.CellHeight - 1, true))
                         {

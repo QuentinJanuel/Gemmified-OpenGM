@@ -41,9 +41,27 @@ internal class GMTilesLayer : DrawWithDepth
             return;
         }
 
-        for (var _y = 0; _y < Element.Height; _y++)
+        // This used to loop the ENTIRE tilemap grid every frame and rely on GraphicsManager.Draw's
+        // own per-draw-call bounds check to discard whatever ended up off-screen. For a large level
+        // (the normal case for a map/level editor) that meant submitting hundreds of
+        // already-known-invisible tiles to the render pipeline every single frame, each paying a
+        // real GL.BufferData+GL.DrawArrays round trip (a [JSImport]/WebGL2 boundary crossing under
+        // browser-wasm, far pricier than a native GL call) before being thrown away. Clamping the
+        // loop to the tile range that actually overlaps the current view (plus a 1-tile margin for
+        // tiles that are only partially on-screen) skips that submission entirely instead of
+        // discarding it downstream.
+        var viewArea = GraphicsManager.ViewArea;
+        var originX = Element.x + Element.Layer.X;
+        var originY = Element.y + Element.Layer.Y;
+
+        var minX = Math.Max(0, CustomMath.FloorToInt((viewArea.X - originX) / _tileSet.TileWidth) - 1);
+        var maxX = Math.Min(Element.Width - 1, CustomMath.FloorToInt((viewArea.X + viewArea.Z - originX) / _tileSet.TileWidth) + 1);
+        var minY = Math.Max(0, CustomMath.FloorToInt((viewArea.Y - originY) / _tileSet.TileHeight) - 1);
+        var maxY = Math.Min(Element.Height - 1, CustomMath.FloorToInt((viewArea.Y + viewArea.W - originY) / _tileSet.TileHeight) + 1);
+
+        for (var _y = minY; _y <= maxY; _y++)
         {
-            for (var _x = 0; _x < Element.Width; _x++)
+            for (var _x = minX; _x <= maxX; _x++)
             {
                 var tile = Element.TilesData[_y, _x];
 

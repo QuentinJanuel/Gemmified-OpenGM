@@ -149,7 +149,12 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
 
             foreach (var item in def.StaticVariables)
             {
-                VMExecutor.Call.Function!.StaticVariables.Add(item.Key, item.Value);
+                // Assign, don't Add: this is what a `child() : parent() constructor` emits to pull
+                // the parent's statics into the child's static table, and it runs once per
+                // construction. Add threw Argument_AddingDuplicateWithKey the SECOND time any
+                // inherited constructor was used -- so tijit engine 2's first save-select menu built
+                // fine and every button after it died.
+                VMExecutor.Call.Function!.StaticVariables[item.Key] = item.Value;
             }
 
             return null;

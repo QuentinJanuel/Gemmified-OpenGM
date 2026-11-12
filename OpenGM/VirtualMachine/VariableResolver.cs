@@ -1,6 +1,8 @@
 ﻿using OpenGM.IO;
+using OpenGM.Loading;
 using OpenGM.Rendering;
 using OpenGM.VirtualMachine.BuiltInFunctions;
+using OpenTK.Mathematics;
 using System.Collections;
 using System.Diagnostics;
 
@@ -22,7 +24,7 @@ public static class VariableResolver
     {
         if (getter() is not IList array)
         {
-            array = new List<object?>();
+            array = new GMLArray();
             if (setter != null)
             {
                 setter(array);
@@ -32,6 +34,16 @@ public static class VariableResolver
                 throw new ArgumentException("getter returned non-array or null, and there's no setter. what?");
             }
         }
+        else if (setter != null && !onlyGrow && GMLArray.NeedsCopyOnWrite(array))
+        {
+            // Pre-2.3 arrays are value types (see GMLArray). Having a setter means this is a plain
+            // "arr[index] = value" write through a variable we can rebind, so an array that's still
+            // shared with whatever it was assigned from has to be copied before being written to.
+            // The array_set builtin -- i.e. the "arr[@ index] = value" accessor, which exists
+            // precisely to opt out of this -- passes no setter and so always writes in place.
+            array = new GMLArray((IEnumerable<object?>)array);
+            setter(array);
+        }
 
         if (index >= array.Count)
         {
@@ -39,7 +51,7 @@ public static class VariableResolver
             {
                 throw new ArgumentException("tried to grow fixed size array. use List<T> instead of T[]");
             }
-            
+
             var numToAdd = index - array.Count + 1;
             for (var i = 0; i < numToAdd; i++)
             {
@@ -59,16 +71,21 @@ public static class VariableResolver
                 });
             }
         }
-        
+
         // this used to call setter after to trigger side-effects (with builtins mainly)
         // that broke PT, so it was removed
 
-        if (onlyGrow) return; // TODO: should we call the setter here too just in case?
+        if (onlyGrow)
+            return; // TODO: should we call the setter here too just in case?
 
         var arrayType = array.GetType();
 
         Type elementType;
-        if (arrayType.IsGenericType) // List<T>
+        if (array is List<object?>) // a GML array - List<object?> itself, or the GMLArray subclass
+        {
+            elementType = typeof(object);
+        }
+        else if (arrayType.IsGenericType) // List<T>
         {
             elementType = arrayType.GenericTypeArguments[0];
         }
@@ -124,47 +141,47 @@ public static class VariableResolver
         { "NaN", (get_nan, null) },
         { "infinity", (get_infinity, null) },
         { "room", (get_room, set_room) },
-        { "room_first", (null, null)},
-        { "room_last", (null, null)},
+        { "room_first", (get_room_first, null)},
+        { "room_last", (get_room_last, null)},
         { "transition_kind", (null, null)},
         { "transition_steps", (null, null)},
-        { "score", (null, null)},
-        { "lives", (null, null)},
-        { "health", (null, null)},
+        { "score", (get_score, set_score)},
+        { "lives", (get_lives, set_lives)},
+        { "health", (get_health, set_health)},
         { "game_id", (null, null)},
-        { "game_display_name", (null, null)},
-        { "game_project_name", (null, null)},
+        { "game_display_name", (get_game_display_name, null)},
+        { "game_project_name", (get_game_project_name, null)},
         { "game_save_id", (get_game_save_id, null)},
         { "working_directory", (get_working_directory, null) },
         { "temp_directory", (null, null)},
-        { "program_directory", (null, null)},
+        { "program_directory", (get_working_directory, null)},
         { "instance_count", (get_instance_count, null)},
-        { "instance_id", (null, null)},
+        { "instance_id", (get_instance_id, null)},
         { "room_width", (get_room_width, null) },
         { "room_height", (get_room_height, null) },
         { "room_caption", (null, null)},
         { "room_speed", (get_room_speed, set_room_speed) },
         { "room_persistent", (get_room_persistent, set_room_persistent)},
-        { "background_color", (null, null)},
-        { "background_showcolor", (null, null)},
-        { "background_colour", (null, null)},
-        { "background_showcolour", (null, null)},
-        { "background_visible", (null, null)},
-        { "background_foreground", (null, null)},
-        { "background_index", (null, null)},
-        { "background_x", (null, null)},
-        { "background_y", (null, null)},
-        { "background_width", (null, null)},
-        { "background_height", (null, null)},
-        { "background_htiled", (null, null)},
-        { "background_vtiled", (null, null)},
+        { "background_color", (get_room_background_color, set_room_background_color)},
+        { "background_showcolor", (get_room_background_showcolor, set_room_background_showcolor)},
+        { "background_colour", (get_room_background_color, set_room_background_color)},
+        { "background_showcolour", (get_room_background_showcolor, set_room_background_showcolor)},
+        { "background_visible", (get_background_visible, set_background_visible)},
+        { "background_foreground", (get_background_foreground, set_background_foreground)},
+        { "background_index", (get_background_index, set_background_index)},
+        { "background_x", (get_background_x, set_background_x)},
+        { "background_y", (get_background_y, set_background_y)},
+        { "background_width", (get_background_width, null)},
+        { "background_height", (get_background_height, null)},
+        { "background_htiled", (get_background_htiled, set_background_htiled)},
+        { "background_vtiled", (get_background_vtiled, set_background_vtiled)},
         { "background_xscale", (get_background_xscale, set_background_xscale)},
         { "background_yscale", (get_background_yscale, set_background_yscale)},
-        { "background_hspeed", (null, null)},
-        { "background_vspeed", (null, null)},
-        { "background_blend", (null, null)},
-        { "background_alpha", (null, null)},
-        { "view_enabled", (null, null)},
+        { "background_hspeed", (get_background_hspeed, set_background_hspeed)},
+        { "background_vspeed", (get_background_vspeed, set_background_vspeed)},
+        { "background_blend", (get_background_blend, set_background_blend)},
+        { "background_alpha", (get_background_alpha, set_background_alpha)},
+        { "view_enabled", (get_view_enabled, set_view_enabled)},
         { "view_current", (get_view_current, null)},
         { "view_visible", (get_view_visible, set_view_visible)},
         { "view_xview", (get_view_xview, set_view_xview)},
@@ -175,20 +192,20 @@ public static class VariableResolver
         { "view_yport", (get_view_yport, set_view_yport)},
         { "view_wport", (get_view_wport, set_view_wport)},
         { "view_hport", (get_view_hport, set_view_hport)},
-        { "view_angle", (null, null)},
-        { "view_hborder", (null, null)},
-        { "view_vborder", (null, null)},
-        { "view_hspeed", (null, null)},
-        { "view_vspeed", (null, null)},
-        { "view_object", (null, null)},
-        { "view_surface_id", (null, null)},
+        { "view_angle", (get_view_angle, set_view_angle)},
+        { "view_hborder", (get_view_hborder, set_view_hborder)},
+        { "view_vborder", (get_view_vborder, set_view_vborder)},
+        { "view_hspeed", (get_view_hspeed, set_view_hspeed)},
+        { "view_vspeed", (get_view_vspeed, set_view_vspeed)},
+        { "view_object", (get_view_object, set_view_object)},
+        { "view_surface_id", (get_view_surface_id, set_view_surface_id)},
         { "view_camera", (get_view_camera, set_view_camera)},
         { "mouse_x", (get_mouse_x, null)},
         { "mouse_y", (get_mouse_y, null)},
         // mouse_button
         // mouse_lastbutton
-        // keyboard_key
-        // keyboard_lastkey
+        { "keyboard_key", (get_keyboard_key, set_keyboard_key)},
+        { "keyboard_lastkey", (get_keyboard_lastkey, set_keyboard_lastkey)},
         // keyboard_lastchar
         { "keyboard_string", (get_keyboard_string, set_keyboard_string)},
         // cursor_sprite
@@ -201,12 +218,12 @@ public static class VariableResolver
         { "fps", (get_fps, null) },
         { "fps_real", (get_fps_real, null) },
         { "current_time", (get_current_time, null)},
-        // current_year
+        { "current_year", (get_current_year, null)},
         { "current_month", (get_current_month, null)},
-        // current_day
+        { "current_day", (get_current_day, null)},
         { "current_weekday", (get_current_weekday, null)},
-        // current_hour
-        // current_minute
+        { "current_hour", (get_current_hour, null)},
+        { "current_minute", (get_current_minute, null)},
         { "current_second", (get_current_second, null)},
         { "event_type", (get_event_type, null)},
         { "event_number", (get_event_number, null)},
@@ -223,14 +240,14 @@ public static class VariableResolver
         { "os_type", (get_os_type, null) },
         // os_device
         // os_version
-        // os_browser
+        { "os_browser", (get_os_browser, null) },
         { "browser_width", (get_browser_width, null) },
         { "browser_height", (get_browser_height, null) },
 
         /* TODO: this is a hack fix! delta_time is a self variable,
          * but can be called by constructors which don't have an associated GamemakerObject!
          */
-        { "delta_time", ((_) => TimingManager.DeltaTime, null)} 
+        { "delta_time", ((_) => TimingManager.DeltaTime, null)}
     };
 
     // InitLocalVariables
@@ -253,7 +270,7 @@ public static class VariableResolver
         { "object_index", (get_object_index, null) },
         { "id", (get_id, null) },
         { "alarm", (get_alarm, set_alarm) },
-        { "solid", (null, null)},
+        { "solid", (get_solid, set_solid)},
         { "visible", (get_visible, set_visible) },
         { "persistent", (get_persistent, set_persistent) },
         { "depth", (get_depth, set_depth) },
@@ -263,7 +280,7 @@ public static class VariableResolver
         { "bbox_bottom", (get_bbox_bottom, null) },
         { "sprite_index", (get_sprite_index, set_sprite_index) },
         { "image_index", (get_image_index, set_image_index) },
-        { "image_single", (null, null)},
+        { "image_single", (get_image_single, set_image_single)},
         { "image_number", (get_image_number, null) },
         { "sprite_width", (get_sprite_width, null) },
         { "sprite_height", (get_sprite_height, null) },
@@ -278,13 +295,17 @@ public static class VariableResolver
         { "mask_index", (get_mask_index, set_mask_index)},
         { "path_index", (get_path_index, null)},
         { "path_position", (get_path_position, set_path_position)},
-        { "path_positionprevious", (null, null)},
+        { "path_positionprevious", (get_path_positionprevious, set_path_positionprevious)},
         { "path_speed", (get_path_speed, set_path_speed)},
         { "path_scale", (get_path_scale, set_path_scale)},
-        { "path_orientation", (null, null)},
-        { "path_endaction", (null, null)},
-        
-        // .. timeline stuff
+        { "path_orientation", (get_path_orientation, set_path_orientation)},
+        { "path_endaction", (get_path_endaction, set_path_endaction)},
+
+        { "timeline_index", (get_timeline_index, set_timeline_index)},
+        { "timeline_position", (get_timeline_position, set_timeline_position)},
+        { "timeline_speed", (get_timeline_speed, set_timeline_speed)},
+        { "timeline_running", (get_timeline_running, set_timeline_running)},
+        { "timeline_loop", (get_timeline_loop, set_timeline_loop)},
 
         { "async_load", (get_async_load, null) },
         // event_data
@@ -392,6 +413,9 @@ public static class VariableResolver
     public static object get_persistent(GamemakerObject instance) => instance.persistent;
     public static void set_persistent(GamemakerObject instance, object? value) => instance.persistent = value.Conv<bool>();
 
+    public static object get_solid(GamemakerObject instance) => instance.solid;
+    public static void set_solid(GamemakerObject instance, object? value) => instance.solid = value.Conv<bool>();
+
     public static object get_id(GamemakerObject instance) => instance.instanceId;
 
     public static object get_gravity(GamemakerObject instance) => instance.gravity;
@@ -418,7 +442,20 @@ public static class VariableResolver
 
     public static object get_async_load(GamemakerObject instance) => AsyncManager.AsyncLoadDsIndex;
 
+    // os_browser's real GameMaker numeric value isn't independently confirmed here (best-effort
+    // recollection, not verified against a live GameMaker install) -- what actually matters for
+    // game logic is that os_type resolves to this exact same value under BROWSER, so an "if
+    // (os_type == os_browser)" check works regardless of what the literal number is. If some game's
+    // logic instead hardcodes the raw numeric literal directly (rare, but possible), it may not
+    // match a real GameMaker export -- flag if platform-branching behavior looks wrong.
+    private const int OsBrowserValue = 3;
+    public static object get_os_browser(int index) => OsBrowserValue;
+
+#if BROWSER
+    public static object get_os_type(int index) => OsBrowserValue;
+#else
     public static object get_os_type(int index) => 0;
+#endif
 
     public static object get_browser_width(int index) => CustomWindow.Instance.ClientSize.X;
     public static object get_browser_height(int index) => CustomWindow.Instance.ClientSize.Y;
@@ -490,6 +527,12 @@ public static class VariableResolver
     public static object get_keyboard_string(int index) => InputHandler.KeyboardString;
     public static void set_keyboard_string(object? value, int index) => InputHandler.KeyboardString = value.Conv<string>();
 
+    public static object get_keyboard_key(int index) => InputHandler.KeyboardKey;
+    public static void set_keyboard_key(object? value, int index) => InputHandler.KeyboardKey = value.Conv<int>();
+
+    public static object get_keyboard_lastkey(int index) => InputHandler.KeyboardLastKey;
+    public static void set_keyboard_lastkey(object? value, int index) => InputHandler.KeyboardLastKey = value.Conv<int>();
+
     public static object? get_pointer_null(int index) => null;
 
     public static object get_xprevious(GamemakerObject instance) => instance.xprevious;
@@ -512,13 +555,68 @@ public static class VariableResolver
     public static object get_path_scale(GamemakerObject instance) => instance.path_scale;
     public static void set_path_scale(GamemakerObject instance, object? value) => instance.path_scale = value.Conv<double>();
 
+    public static object get_timeline_index(GamemakerObject instance) => instance.timeline_index;
+    public static void set_timeline_index(GamemakerObject instance, object? value) => instance.timeline_index = value.Conv<int>();
+
+    public static object get_timeline_position(GamemakerObject instance) => instance.timeline_position;
+    public static void set_timeline_position(GamemakerObject instance, object? value) => instance.timeline_position = value.Conv<double>();
+
+    public static object get_timeline_speed(GamemakerObject instance) => instance.timeline_speed;
+    public static void set_timeline_speed(GamemakerObject instance, object? value) => instance.timeline_speed = value.Conv<double>();
+
+    public static object get_timeline_running(GamemakerObject instance) => instance.timeline_running;
+    public static void set_timeline_running(GamemakerObject instance, object? value) => instance.timeline_running = value.Conv<bool>();
+
+    public static object get_timeline_loop(GamemakerObject instance) => instance.timeline_loop;
+    public static void set_timeline_loop(GamemakerObject instance, object? value) => instance.timeline_loop = value.Conv<bool>();
+
     public static object get_instance_count(int index) => InstanceManager.instances.Count; // TODO : this should only count instances at the START of the step
 
-    public static object get_current_time(int index) => (DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalMilliseconds; // TODO : do this in a better way
+    /// <summary>
+    /// instance_id[n] -- the n-th active instance's id. Reads past the end give noone rather than
+    /// throwing, which games rely on: the idiom for walking every instance is
+    /// <c>for (a = 0; a &lt;= instance_count; a += 1) { iii = instance_id[a]; if (instance_exists(iii)) ... }</c>
+    /// and that <c>&lt;=</c> deliberately runs one index past the last instance every time, leaning on
+    /// instance_exists to reject the result (Spook Jam's Quentin_objSpotlight is written exactly so).
+    /// Matches OpenGMK's InstanceList::instance_at, which also returns NOONE when the index misses.
+    ///
+    /// Deactivated instances live in inactiveInstances, not instances, so they're skipped here --
+    /// same as OpenGMK filtering InstanceState::Inactive, and consistent with what instance_count
+    /// above reports, which is what bounds the loop.
+    ///
+    /// One deviation: GameMaker indexes these in draw order, this is the instance table's own order
+    /// (i.e. roughly creation order). Sorting by depth on every access would make the idiom above
+    /// quadratic-plus, and nothing in the corpus depends on the ordering -- every use just scans the
+    /// whole list.
+    /// </summary>
+    public static object get_instance_id(int index)
+    {
+        if (index < 0 || index >= InstanceManager.instances.Count)
+        {
+            return GMConstants.noone;
+        }
+
+        return InstanceManager.instances.Values.ElementAt(index).instanceId;
+    }
+
+    private static readonly Stopwatch _uptimeStopwatch = Stopwatch.StartNew(); // Process.GetCurrentProcess().StartTime throws under WASM (Process_PlatformNotSupported)
+
+    public static object get_current_time(int index) => (double)_uptimeStopwatch.ElapsedMilliseconds;
+
+    public static object get_current_year(int index) => DateTime.Now.Year;
 
     public static object get_current_month(int index) => DateTime.Now.Month;
 
-    public static object get_current_weekday(int index) => DateTime.Now.DayOfWeek;
+    public static object get_current_day(int index) => DateTime.Now.Day;
+
+    // Cast to int: DayOfWeek is a C# enum, and pushing it raw hands the VM a boxed enum where every
+    // other date variable gives a number -- Date.cs already casts for date_get_weekday. Numbering
+    // agrees with GameMaker's anyway (0 = Sunday).
+    public static object get_current_weekday(int index) => (int)DateTime.Now.DayOfWeek;
+
+    public static object get_current_hour(int index) => DateTime.Now.Hour;
+
+    public static object get_current_minute(int index) => DateTime.Now.Minute;
 
     public static object get_current_second(int index) => DateTime.Now.Second;
 
@@ -532,25 +630,173 @@ public static class VariableResolver
     public static object? get_event_type(int index) => (int)DrawManager.EventType - 1;
     public static object? get_event_number(int index) => DrawManager.EventNumber;
 
-    public static object? get_background_xscale(int index)
-    {
-        DebugLog.LogWarning("get_background_xscale not implemented.");
-        return 0;
-    }
-
+    public static object? get_background_xscale(int index) => RoomManager.CurrentRoom.OldBackgrounds[index].Scale.X;
     public static void set_background_xscale(object? value, int index)
     {
-        DebugLog.LogWarning("set_background_xscale not implemented.");
+        var bg = RoomManager.CurrentRoom.OldBackgrounds[index];
+        bg.Scale = new Vector2(value.Conv<float>(), bg.Scale.Y);
     }
 
-    public static object? get_background_yscale(int index)
-    {
-        DebugLog.LogWarning("get_background_yscale not implemented.");
-        return 0;
-    }
-
+    public static object? get_background_yscale(int index) => RoomManager.CurrentRoom.OldBackgrounds[index].Scale.Y;
     public static void set_background_yscale(object? value, int index)
     {
-        DebugLog.LogWarning("set_background_yscale not implemented.");
+        var bg = RoomManager.CurrentRoom.OldBackgrounds[index];
+        bg.Scale = new Vector2(bg.Scale.X, value.Conv<float>());
     }
+
+    public static object get_background_visible(int index) => RoomManager.CurrentRoom.OldBackgrounds[index].Enabled;
+    public static void set_background_visible(object? value, int index) => RoomManager.CurrentRoom.OldBackgrounds[index].Enabled = value.Conv<bool>();
+
+    public static object get_background_foreground(int index) => RoomManager.CurrentRoom.OldBackgrounds[index].Foreground;
+    public static void set_background_foreground(object? value, int index) => RoomManager.CurrentRoom.OldBackgrounds[index].Foreground = value.Conv<bool>();
+
+    public static object get_background_index(int index) => RoomManager.CurrentRoom.OldBackgrounds[index].Definition;
+    public static void set_background_index(object? value, int index) => RoomManager.CurrentRoom.OldBackgrounds[index].Definition = value.Conv<int>();
+
+    public static object get_background_x(int index) => RoomManager.CurrentRoom.OldBackgrounds[index].Position.X;
+    public static void set_background_x(object? value, int index)
+    {
+        var bg = RoomManager.CurrentRoom.OldBackgrounds[index];
+        bg.Position = new(value.Conv<int>(), bg.Position.Y);
+    }
+
+    public static object get_background_y(int index) => RoomManager.CurrentRoom.OldBackgrounds[index].Position.Y;
+    public static void set_background_y(object? value, int index)
+    {
+        var bg = RoomManager.CurrentRoom.OldBackgrounds[index];
+        bg.Position = new(bg.Position.X, value.Conv<int>());
+    }
+
+    public static object get_background_htiled(int index) => RoomManager.CurrentRoom.OldBackgrounds[index].TilingX;
+    public static void set_background_htiled(object? value, int index) => RoomManager.CurrentRoom.OldBackgrounds[index].TilingX = value.Conv<bool>();
+
+    public static object get_background_vtiled(int index) => RoomManager.CurrentRoom.OldBackgrounds[index].TilingY;
+    public static void set_background_vtiled(object? value, int index) => RoomManager.CurrentRoom.OldBackgrounds[index].TilingY = value.Conv<bool>();
+
+    public static object get_background_hspeed(int index) => RoomManager.CurrentRoom.OldBackgrounds[index].Speed.X;
+    public static void set_background_hspeed(object? value, int index)
+    {
+        var bg = RoomManager.CurrentRoom.OldBackgrounds[index];
+        bg.Speed = new(value.Conv<int>(), bg.Speed.Y);
+    }
+
+    public static object get_background_vspeed(int index) => RoomManager.CurrentRoom.OldBackgrounds[index].Speed.Y;
+    public static void set_background_vspeed(object? value, int index)
+    {
+        var bg = RoomManager.CurrentRoom.OldBackgrounds[index];
+        bg.Speed = new(bg.Speed.X, value.Conv<int>());
+    }
+
+    public static object get_background_blend(int index) => RoomManager.CurrentRoom.OldBackgrounds[index].Blend;
+    public static void set_background_blend(object? value, int index) => RoomManager.CurrentRoom.OldBackgrounds[index].Blend = value.Conv<int>();
+
+    public static object get_background_alpha(int index) => RoomManager.CurrentRoom.OldBackgrounds[index].Alpha;
+    public static void set_background_alpha(object? value, int index) => RoomManager.CurrentRoom.OldBackgrounds[index].Alpha = value.Conv<double>();
+
+    public static object get_background_width(int index)
+    {
+        var bg = RoomManager.CurrentRoom.OldBackgrounds[index];
+        if (bg.Definition == -1)
+        {
+            return 0;
+        }
+
+        return GameLoader.Backgrounds[bg.Definition].Texture?.BoundingWidth ?? 0;
+    }
+
+    public static object get_background_height(int index)
+    {
+        var bg = RoomManager.CurrentRoom.OldBackgrounds[index];
+        if (bg.Definition == -1)
+        {
+            return 0;
+        }
+
+        return GameLoader.Backgrounds[bg.Definition].Texture?.BoundingHeight ?? 0;
+    }
+
+    public static object get_view_enabled(int index) => RoomManager.CurrentRoom.RoomAsset.EnableViews;
+    public static void set_view_enabled(object? value, int index) => RoomManager.CurrentRoom.RoomAsset.EnableViews = value.Conv<bool>();
+
+    public static object get_view_angle(int index) => RoomManager.CurrentRoom.Views[index].Angle;
+    public static void set_view_angle(object? value, int index) => RoomManager.CurrentRoom.Views[index].Angle = value.Conv<float>();
+
+    public static object get_view_hborder(int index) => RoomManager.CurrentRoom.Views[index].Border.X;
+    public static void set_view_hborder(object? value, int index)
+    {
+        var view = RoomManager.CurrentRoom.Views[index];
+        view.Border = new(value.Conv<float>(), view.Border.Y);
+    }
+
+    public static object get_view_vborder(int index) => RoomManager.CurrentRoom.Views[index].Border.Y;
+    public static void set_view_vborder(object? value, int index)
+    {
+        var view = RoomManager.CurrentRoom.Views[index];
+        view.Border = new(view.Border.X, value.Conv<float>());
+    }
+
+    public static object get_view_hspeed(int index) => RoomManager.CurrentRoom.Views[index].Speed.X;
+    public static void set_view_hspeed(object? value, int index)
+    {
+        var view = RoomManager.CurrentRoom.Views[index];
+        view.Speed = new(value.Conv<float>(), view.Speed.Y);
+    }
+
+    public static object get_view_vspeed(int index) => RoomManager.CurrentRoom.Views[index].Speed.Y;
+    public static void set_view_vspeed(object? value, int index)
+    {
+        var view = RoomManager.CurrentRoom.Views[index];
+        view.Speed = new(view.Speed.X, value.Conv<float>());
+    }
+
+    public static object get_view_object(int index) => RoomManager.CurrentRoom.Views[index].FollowObject;
+    public static void set_view_object(object? value, int index) => RoomManager.CurrentRoom.Views[index].FollowObject = value.Conv<int>();
+
+    public static object get_view_surface_id(int index) => RoomManager.CurrentRoom.Views[index].SurfaceId;
+    public static void set_view_surface_id(object? value, int index) => RoomManager.CurrentRoom.Views[index].SurfaceId = value.Conv<int>();
+
+    public static object get_room_background_color(int index) => (int)RoomManager.CurrentRoom.BackgroundColor;
+    public static void set_room_background_color(object? value, int index) => RoomManager.CurrentRoom.BackgroundColor = (uint)value.Conv<int>();
+
+    public static object get_room_background_showcolor(int index) => RoomManager.CurrentRoom.DrawBackgroundColor;
+    public static void set_room_background_showcolor(object? value, int index) => RoomManager.CurrentRoom.DrawBackgroundColor = value.Conv<bool>();
+
+    public static object get_room_first(int index) => GameLoader.GeneralInfo.RoomOrder[0];
+    public static object get_room_last(int index) => GameLoader.GeneralInfo.RoomOrder[^1];
+
+    public static object get_game_display_name(int index) => GameLoader.GeneralInfo.Name;
+    public static object get_game_project_name(int index) => GameLoader.GeneralInfo.Name;
+
+    // Real GM defaults: score starts at 0, lives/health start at -1 ("system not in use" until a
+    // script explicitly sets one) -- these are otherwise completely inert bookkeeping GM8 provided
+    // for convenience (no built-in HUD ties into them without a game also calling draw_score/
+    // draw_health, which aren't implemented here).
+    private static double _score;
+    private static double _lives = -1;
+    private static double _health = -1;
+
+    public static object get_score(int index) => _score;
+    public static void set_score(object? value, int index) => _score = value.Conv<double>();
+
+    public static object get_lives(int index) => _lives;
+    public static void set_lives(object? value, int index) => _lives = value.Conv<double>();
+
+    public static object get_health(int index) => _health;
+    public static void set_health(object? value, int index) => _health = value.Conv<double>();
+
+    public static object get_image_single(GamemakerObject instance) => instance.image_speed == 0 ? instance.image_index : -1;
+    public static void set_image_single(GamemakerObject instance, object? value)
+    {
+        instance.image_speed = 0;
+        instance.image_index = value.Conv<double>();
+    }
+
+    public static object get_path_positionprevious(GamemakerObject instance) => instance.path_previousposition;
+    public static void set_path_positionprevious(GamemakerObject instance, object? value) => instance.path_previousposition = value.Conv<double>();
+
+    public static object get_path_orientation(GamemakerObject instance) => instance.path_orientation;
+    public static void set_path_orientation(GamemakerObject instance, object? value) => instance.path_orientation = value.Conv<double>();
+
+    public static object get_path_endaction(GamemakerObject instance) => (int)instance.path_endaction;
+    public static void set_path_endaction(GamemakerObject instance, object? value) => instance.path_endaction = (PathEndAction)value.Conv<int>();
 }

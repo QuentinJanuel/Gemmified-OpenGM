@@ -1,5 +1,4 @@
-﻿using NAudio.Midi;
-using OpenGM.IO;
+﻿using OpenGM.IO;
 using OpenGM.Rendering;
 using OpenTK.Mathematics;
 
@@ -7,9 +6,77 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions;
 
 public static class GameFunctions
 {
-    // move_random
-    // place_free
-    // place_empty
+    /// <summary>
+    /// Not a motion_set-style direction/speed function despite the name -- real GM8 "Move Random"
+    /// teleports the instance to a random free position within the room (snapped to hsnap/vsnap if
+    /// given), retrying up to 100 times to find a spot that isn't solid-colliding. Ported from
+    /// OpenGMK's gm8emulator/src/gml/kernel.rs Game::move_random, which is the reference for both
+    /// this and action_move_random.
+    /// </summary>
+    [GMLFunction("move_random")]
+    public static object? move_random(object?[] args)
+    {
+        var hsnap = args[0].Conv<double>();
+        var vsnap = args[1].Conv<double>();
+
+        var self = VMExecutor.Self.GMSelf;
+        var roomWidth = RoomManager.CurrentRoom.SizeX;
+        var roomHeight = RoomManager.CurrentRoom.SizeY;
+
+        var left = self.x - self.bbox_left;
+        var right = self.x + roomWidth - self.bbox_right;
+        var top = self.y - self.bbox_top;
+        var bottom = self.y + roomHeight - self.bbox_bottom;
+
+        var newX = self.x;
+        var newY = self.y;
+
+        var rangeX = Math.Max(1, (int)Math.Round(right - left - 1));
+        var rangeY = Math.Max(1, (int)Math.Round(bottom - top - 1));
+
+        for (var i = 0; i < 100; i++)
+        {
+            newX = GMRandom.YYRandom(rangeX) + left;
+            if (hsnap > 0)
+            {
+                newX = Math.Floor(newX / hsnap) * hsnap;
+            }
+
+            newY = GMRandom.YYRandom(rangeY) + top;
+            if (vsnap > 0)
+            {
+                newY = Math.Floor(newY / vsnap) * vsnap;
+            }
+
+            if (CollisionManager.Command_PlaceFree(self, newX, newY, solidOnly: true))
+            {
+                break;
+            }
+        }
+
+        self.x = newX;
+        self.y = newY;
+
+        return null;
+    }
+
+    [GMLFunction("place_free")]
+    public static object place_free(object?[] args)
+    {
+        var x = args[0].Conv<double>();
+        var y = args[1].Conv<double>();
+
+        return CollisionManager.Command_PlaceFree(VMExecutor.Self.GMSelf, x, y, solidOnly: true);
+    }
+
+    [GMLFunction("place_empty")]
+    public static object place_empty(object?[] args)
+    {
+        var x = args[0].Conv<double>();
+        var y = args[1].Conv<double>();
+
+        return CollisionManager.Command_PlaceFree(VMExecutor.Self.GMSelf, x, y, solidOnly: false);
+    }
 
     [GMLFunction("place_meeting")]
     public static object place_meeting(object?[] args)
@@ -23,7 +90,19 @@ public static class GameFunctions
         return result >= 0;
     }
 
-    // place_snapped
+    [GMLFunction("place_snapped")]
+    public static object place_snapped(object?[] args)
+    {
+        var hsnap = args[0].Conv<double>();
+        var vsnap = args[1].Conv<double>();
+
+        var self = VMExecutor.Self.GMSelf;
+
+        var hOk = hsnap <= 0 || Math.Abs(self.x - (Math.Round(self.x / hsnap) * hsnap)) < 0.001;
+        var vOk = vsnap <= 0 || Math.Abs(self.y - (Math.Round(self.y / vsnap) * vsnap)) < 0.001;
+
+        return hOk && vOk;
+    }
 
     [GMLFunction("move_snap")]
     public static object? move_snap(object?[] args)
@@ -59,16 +138,260 @@ public static class GameFunctions
         VMExecutor.Self.GMSelf.direction = MathFunctions.point_direction(VMExecutor.Self.GMSelf.x, VMExecutor.Self.GMSelf.y, targetx, targety).Conv<double>();
         VMExecutor.Self.GMSelf.speed = sp;
 
+        // A builtin that "returns nothing" still pushes a value, and in GameMaker that value is 0,
+        // not undefined (OpenGMK's kernel.rs returns Ok(Default::default()) == Real(0) from every
+        // one of these). It matters because games do consume it: Spook Jam's scrDB_PreFire calls
+        // `round(move_towards_point(xxx, yyy, 10))`, and undefined makes round() throw.
+        return 0;
+    }
+
+    [GMLFunction("move_contact_solid")]
+    public static object? move_contact_solid(object?[] args) => MoveContact(args, solidOnly: true);
+
+    [GMLFunction("move_contact_all")]
+    public static object? move_contact_all(object?[] args) => MoveContact(args, solidOnly: false);
+
+    /// <summary>
+    /// The pre-Studio one-argument form: no distance limit (which MoveContact reads as its 1000
+    /// default), and against everything rather than solids only -- the same aliasing OpenGMK's
+    /// mappings.rs uses.
+    /// </summary>
+    [GMLFunction("move_contact")]
+    public static object? move_contact(object?[] args) => MoveContact([args[0], -1d], solidOnly: false);
+
+    private static object? MoveContact(object?[] args, bool solidOnly)
+    {
+        var direction = args[0].Conv<double>();
+        var maxDistanceArg = args[1].Conv<double>();
+        var maxDistance = maxDistanceArg > 0 ? (int)Math.Round(maxDistanceArg) : 1000; // GML default
+
+        var self = VMExecutor.Self.GMSelf;
+
+        var stepX = Math.Cos(direction * CustomMath.Deg2Rad);
+        var stepY = -Math.Sin(direction * CustomMath.Deg2Rad);
+
+        // Already colliding -- do nothing, matching real GM.
+        if (!CollisionManager.Command_PlaceFree(self, self.x, self.y, solidOnly))
+        {
+            return null;
+        }
+
+        for (var i = 0; i < maxDistance; i++)
+        {
+            var newX = self.x + stepX;
+            var newY = self.y + stepY;
+
+            if (!CollisionManager.Command_PlaceFree(self, newX, newY, solidOnly))
+            {
+                break;
+            }
+
+            self.x = newX;
+            self.y = newY;
+        }
+
         return null;
     }
 
-    // move_contact_solid
-    // move_contact_all
-    // move_outside_solid
-    // move_outside_all
-    // move_bounce_solid
-    // move_bounce_all
-    // move_wrap
+    [GMLFunction("move_outside_solid")]
+    public static object? move_outside_solid(object?[] args) => MoveOutside(args, solidOnly: true);
+
+    [GMLFunction("move_outside_all")]
+    public static object? move_outside_all(object?[] args) => MoveOutside(args, solidOnly: false);
+
+    private static object? MoveOutside(object?[] args, bool solidOnly)
+    {
+        var direction = args[0].Conv<double>();
+        var maxDistanceArg = args[1].Conv<double>();
+        var maxDistance = maxDistanceArg > 0 ? (int)Math.Round(maxDistanceArg) : 1000; // GML default
+
+        var self = VMExecutor.Self.GMSelf;
+
+        var stepX = Math.Cos(direction * CustomMath.Deg2Rad);
+        var stepY = -Math.Sin(direction * CustomMath.Deg2Rad);
+
+        // Only bother if we're actually inside something right now.
+        if (!CollisionManager.IsCollidingAtCurrentPosition(self, solidOnly))
+        {
+            return null;
+        }
+
+        for (var i = 0; i < maxDistance; i++)
+        {
+            self.x += stepX;
+            self.y += stepY;
+
+            if (!CollisionManager.IsCollidingAtCurrentPosition(self, solidOnly))
+            {
+                break;
+            }
+        }
+
+        return null;
+    }
+
+    [GMLFunction("move_bounce_solid")]
+    // The pre-Studio name for the solid-only variant, aliased the same way in OpenGMK's mappings.rs.
+    [GMLFunction("move_bounce")]
+    public static object? move_bounce_solid(object?[] args) => MoveBounce(args, solidOnly: true);
+
+    [GMLFunction("move_bounce_all")]
+    public static object? move_bounce_all(object?[] args) => MoveBounce(args, solidOnly: false);
+
+    /// <summary>
+    /// Real GM8's "advanced" bounce ("advanced" arg == true): scan clockwise and counter-clockwise
+    /// from the current direction (in 10-degree steps, up to 36 of them each way) for the nearest
+    /// angle that's clear, then reflect off the midpoint of those two angles. Non-advanced: a simple
+    /// axis-aligned hspeed/vspeed sign flip. Ported directly from OpenGMK's game/movement.rs
+    /// (bounce/bounce_advanced) -- upstream's own comment notes the "advanced" mode's math is a
+    /// faithful port of a genuinely eccentric real-GM8 algorithm, not a simplification.
+    /// </summary>
+    private static object? MoveBounce(object?[] args, bool solidOnly)
+    {
+        var advanced = args[0].Conv<int>() == 1;
+        var self = VMExecutor.Self.GMSelf;
+
+        if (advanced)
+        {
+            BounceAdvanced(self, solidOnly);
+        }
+        else
+        {
+            Bounce(self, solidOnly);
+        }
+
+        return null;
+    }
+
+    private static void Bounce(GamemakerObject self, bool solidOnly)
+    {
+        if (CollisionManager.IsCollidingAtCurrentPosition(self, solidOnly))
+        {
+            self.x = self.xprevious;
+            self.y = self.yprevious;
+        }
+
+        var oldX = self.x;
+        var oldY = self.y;
+
+        self.x = oldX + self.hspeed;
+        var xBounce = CollisionManager.IsCollidingAtCurrentPosition(self, solidOnly);
+
+        self.x = oldX;
+        self.y = oldY + self.vspeed;
+        var yBounce = CollisionManager.IsCollidingAtCurrentPosition(self, solidOnly);
+
+        if (xBounce)
+        {
+            self.hspeed = -self.hspeed;
+        }
+
+        if (yBounce)
+        {
+            self.vspeed = -self.vspeed;
+        }
+
+        if (!xBounce && !yBounce)
+        {
+            self.x = oldX + self.hspeed;
+            self.y = oldY;
+            if (CollisionManager.IsCollidingAtCurrentPosition(self, solidOnly))
+            {
+                self.hspeed = -self.hspeed;
+                self.vspeed = -self.vspeed;
+            }
+        }
+
+        self.x = oldX;
+        self.y = oldY;
+    }
+
+    private static void BounceAdvanced(GamemakerObject self, bool solidOnly)
+    {
+        var bounce = false;
+
+        if (CollisionManager.IsCollidingAtCurrentPosition(self, solidOnly))
+        {
+            self.x = self.xprevious;
+            self.y = self.yprevious;
+            bounce = true;
+        }
+
+        var oldX = self.x;
+        var oldY = self.y;
+
+        var startAngle = Math.Round(self.direction / 10.0) * 10;
+
+        double GetSideCollisionAngle(int angleStep)
+        {
+            var sideAngle = startAngle;
+
+            for (var i = 0; i < 36; i++)
+            {
+                sideAngle += angleStep;
+                self.x = oldX + (self.speed * Math.Cos(sideAngle * CustomMath.Deg2Rad));
+                self.y = oldY - (self.speed * Math.Sin(sideAngle * CustomMath.Deg2Rad));
+
+                if (!CollisionManager.IsCollidingAtCurrentPosition(self, solidOnly))
+                {
+                    break;
+                }
+
+                bounce = true;
+            }
+
+            return sideAngle;
+        }
+
+        var cw = GetSideCollisionAngle(-10);
+        var ccw = GetSideCollisionAngle(10);
+
+        if (bounce)
+        {
+            self.direction = cw + ccw + 180 - startAngle;
+        }
+
+        self.x = oldX;
+        self.y = oldY;
+    }
+
+    [GMLFunction("move_wrap")]
+    public static object? move_wrap(object?[] args)
+    {
+        var horizontalWrap = args[0].Conv<bool>();
+        var verticalWrap = args[1].Conv<bool>();
+        var margin = args[2].Conv<double>();
+
+        var self = VMExecutor.Self.GMSelf;
+        var roomWidth = RoomManager.CurrentRoom.SizeX;
+        var roomHeight = RoomManager.CurrentRoom.SizeY;
+
+        if (horizontalWrap)
+        {
+            if (self.x < -margin)
+            {
+                self.x += roomWidth + (2 * margin);
+            }
+            else if (self.x > roomWidth + margin)
+            {
+                self.x -= roomWidth + (2 * margin);
+            }
+        }
+
+        if (verticalWrap)
+        {
+            if (self.y < -margin)
+            {
+                self.y += roomHeight + (2 * margin);
+            }
+            else if (self.y > roomHeight + margin)
+            {
+                self.y -= roomHeight + (2 * margin);
+            }
+        }
+
+        return null;
+    }
 
     [GMLFunction("motion_set")]
     public static object? motion_set(object?[] args)
@@ -254,8 +577,8 @@ public static class GameFunctions
     public static object? mp_grid_add_cell(object?[] args)
     {
         MotionPlanningManager.GridAddCell(
-            args[0].Conv<int>(), 
-            args[1].Conv<int>(), 
+            args[0].Conv<int>(),
+            args[1].Conv<int>(),
             args[2].Conv<int>());
         return null;
     }
@@ -513,7 +836,8 @@ public static class GameFunctions
         }
         else if (obj == GMConstants.all)
         {
-            return InstanceManager.instances.ElementAt(n).Value.instanceId;
+            var live = InstanceManager.instances.Values.Where(x => !x.Marked && !x.Destroyed).ToArray();
+            return n < live.Length ? live[n].instanceId : GMConstants.noone;
         }
         else if (obj >= GMConstants.FIRST_INSTANCE_ID)
         {
@@ -524,7 +848,11 @@ public static class GameFunctions
         else
         {
             // is an object index
-            var instances = InstanceManager.instances.Values.Where(x => InstanceManager.HasAssetInParents(x.Definition, obj)).ToArray();
+            // Instances already destroyed this step are not in the list, as in GameMaker: a script that
+            // destroys the player and creates a new one must find the new one, not the old.
+            var instances = InstanceManager.instances.Values
+                .Where(x => !x.Marked && !x.Destroyed && InstanceManager.HasAssetInParents(x.Definition, obj))
+                .ToArray();
 
             if (n >= instances.Length)
             {
@@ -562,7 +890,20 @@ public static class GameFunctions
         return InstanceManager.instance_number(obj);
     }
 
-    // instance_position
+    /// <summary>
+    /// Like instance_place, but tests a single POINT against each candidate's mask rather than
+    /// self's whole mask -- so unlike instance_place it works from an instance with no mask at all.
+    /// </summary>
+    [GMLFunction("instance_position")]
+    public static object instance_position(object?[] args)
+    {
+        var x = args[0].Conv<double>();
+        var y = args[1].Conv<double>();
+        var obj = args[2].Conv<int>();
+
+        return CollisionManager.Command_CollisionPoint(VMExecutor.Self.GMSelf, x, y, obj, true, false);
+    }
+
     // instance_position_list
 
     [GMLFunction("instance_nearest")]
@@ -668,16 +1009,45 @@ public static class GameFunctions
         return InstanceManager.instance_create_layer(x, y, layer, obj, var_struct);
     }
 
-    // instance_copy
+    [GMLFunction("instance_copy")]
+    public static object instance_copy(object?[] args)
+    {
+        var perf = args.Length > 0 && args[0].Conv<bool>();
+        var self = VMExecutor.Self.GMSelf;
+        var definition = self.Definition;
+
+        var newGM = new GamemakerObject(definition, self.x, self.y, (int)self.depth, InstanceManager.NextInstanceID++,
+            self.sprite_index, self.visible, self.persistent, self.mask_index);
+
+        foreach (var (key, value) in self.SelfVariables)
+        {
+            newGM.SelfVariables[key] = value;
+        }
+
+        if (perf)
+        {
+            GamemakerObject.ExecuteEvent(newGM, definition, EventType.PreCreate);
+            GamemakerObject.ExecuteEvent(newGM, definition, EventType.Create);
+        }
+        newGM._createRan = true;
+
+        return newGM.instanceId;
+    }
 
     [GMLFunction("instance_change")]
     public static object? instance_change(object?[] args)
     {
-        var obj = args[0].Conv<int>();
-        var perf = args[1].Conv<bool>();
+        ChangeInstanceObject(VMExecutor.Self.GMSelf, args[0].Conv<int>(), args[1].Conv<bool>());
+        return null;
+    }
 
-        var self = VMExecutor.Self.GMSelf;
-
+    /// <summary>
+    /// The body of instance_change, taken out so position_change can reuse it rather than
+    /// reimplement it -- everything below the object swap is subtle enough (a re-file under the new
+    /// object index, six re-seeded fields, an image_index clamp) that a second copy would drift.
+    /// </summary>
+    public static void ChangeInstanceObject(GamemakerObject self, int obj, bool perf)
+    {
         if (perf)
         {
             GamemakerObject.ExecuteEvent(self, self.Definition, EventType.Destroy);
@@ -686,8 +1056,35 @@ public static class GameFunctions
 
         var definition = InstanceManager.ObjectDefinitions[obj];
 
-        self.Definition = definition;
+        // Not a plain `self.Definition = definition`: the instance also has to be re-filed under
+        // its new object index, or nothing that looks instances up by object can see it as its new
+        // type -- while everything still sees it as its old one. Spook Jam's Raynius stage ends by
+        // turning the player into objRay_ModifiedPlayer for a walk-into-the-door cutscene; objPlayer
+        // is object 1 and objRay_ModifiedPlayer 888, so objPlayer's Collision(objBlock) pair is
+        // driven from objPlayer's own side while the modified player's is driven from objBlock's
+        // (the lower-indexed object always drives). The blocks looked up object 888's instance
+        // list, found it empty, and the ground simply stopped existing -- the player fell straight
+        // through it mid-cutscene.
+        InstanceManager.ChangeObjectDefinition(self, definition);
+
+        // Real GM re-seeds every one of these from the new object, between the Destroy event and
+        // the Create event, so the Create event can override them (which is exactly what this
+        // cutscene's objRay_ModifiedPlayer does with scrSetPlayerMask). Ground truth: OpenGMK's
+        // gml/kernel.rs instance_change.
         self.sprite_index = definition.sprite;
+        self.mask_index = definition.textureMaskId;
+        self.depth = definition.depth;
+        self.solid = definition.solid;
+        self.visible = definition.visible;
+        self.persistent = definition.persistent;
+
+        // An image_index past the end of the new object's sprite restarts at 0.
+        var frameCount = SpriteManager.GetSpriteAsset(definition.sprite)?.Textures.Count ?? 0;
+        if (frameCount <= Math.Floor(self.image_index))
+        {
+            self.image_index = 0;
+        }
+
         self.bbox_dirty = true;
 
         if (perf)
@@ -695,8 +1092,6 @@ public static class GameFunctions
             GamemakerObject.ExecuteEvent(self, self.Definition, EventType.PreCreate);
             GamemakerObject.ExecuteEvent(self, self.Definition, EventType.Create);
         }
-
-        return null;
     }
 
     [GMLFunction("instance_destroy")]
@@ -971,8 +1366,47 @@ public static class GameFunctions
         return x1 <= px && px < x2 && y1 <= py && py <= y2;
     }
 
-    // point_in_triangle
-    // point_in_circle
+    [GMLFunction("point_in_circle")]
+    public static object point_in_circle(object?[] args)
+    {
+        var px = args[0].Conv<double>();
+        var py = args[1].Conv<double>();
+        var cx = args[2].Conv<double>();
+        var cy = args[3].Conv<double>();
+        var radius = args[4].Conv<double>();
+
+        var dx = px - cx;
+        var dy = py - cy;
+
+        return ((dx * dx) + (dy * dy)) <= (radius * radius);
+    }
+
+    [GMLFunction("point_in_triangle")]
+    public static object point_in_triangle(object?[] args)
+    {
+        var px = args[0].Conv<double>();
+        var py = args[1].Conv<double>();
+        var x1 = args[2].Conv<double>();
+        var y1 = args[3].Conv<double>();
+        var x2 = args[4].Conv<double>();
+        var y2 = args[5].Conv<double>();
+        var x3 = args[6].Conv<double>();
+        var y3 = args[7].Conv<double>();
+
+        // Sign of the cross product against each edge: inside means the point is on the same side of
+        // all three, whichever way round the triangle was wound.
+        static double Side(double px, double py, double ax, double ay, double bx, double by)
+            => ((px - bx) * (ay - by)) - ((ax - bx) * (py - by));
+
+        var d1 = Side(px, py, x1, y1, x2, y2);
+        var d2 = Side(px, py, x2, y2, x3, y3);
+        var d3 = Side(px, py, x3, y3, x1, y1);
+
+        var anyNegative = d1 < 0 || d2 < 0 || d3 < 0;
+        var anyPositive = d1 > 0 || d2 > 0 || d3 > 0;
+
+        return !(anyNegative && anyPositive);
+    }
 
     [GMLFunction("rectangle_in_rectangle")]
     public static object? rectangle_in_rectangle(object?[] args)

@@ -47,7 +47,7 @@ public class VMEnvFrame
 public class VMCallFrame
 {
     public string CodeName = null!;
-    
+
     public DataStack Stack = null!;
     public Dictionary<string, object?> Locals = null!;
     public object? ReturnValue;
@@ -112,29 +112,37 @@ public static partial class VMExecutor
                 return Self;
             }
 
-            var top = EnvStack.Peek();
-
-            if (top == null)
-            {
-                // Null at top of stack, in WITH statement. Next value is self, then next value is other.
-                return EnvStack.ToArray()[2]!;
-            }
-
             var stack = EnvStack.ToArray();
-            if (stack.Contains(null))
+
+            // Mid-PUSHENV, computing the new context's `other` before its own real frame has
+            // been pushed (id == GMConstants.other/self case in PUSHENV): the fresh null marker
+            // for the block being entered is on top. Skip it and resolve self/other as if we were
+            // querying one level up, i.e. from the enclosing context's point of view. A fixed
+            // "index 2" offset here (as this used to do) only holds for exactly one level of
+            // pre-existing with-nesting; with two or more (e.g. `with (a) { with (other) { ... } }`
+            // where `a`'s own body is itself already inside a with-block), it lands on an inner
+            // null marker instead of skipping past it, and `.Self` on that null throws.
+            var i = 0;
+            if (stack[i] == null)
             {
-                var i = 0;
-
-                while (stack[i] != null)
-                {
-                    i++;
-                }
-
-                i++; // we found the null, so previous one is the ctx that called PUSHENV
-                return stack[i]!;
+                i++;
             }
 
-            return stack[1]!;
+            var selfIndex = i; // stack[selfIndex] is guaranteed to be a real frame, never null
+            i++;
+
+            while (i < stack.Length && stack[i] != null)
+            {
+                i++;
+            }
+
+            if (i >= stack.Length)
+            {
+                // no enclosing with-block: other == self
+                return stack[selfIndex]!;
+            }
+
+            return stack[i + 1]!;
         }
     }
 
@@ -149,7 +157,7 @@ public static partial class VMExecutor
     /// True if we are currently executing Global Init code.
     /// </summary>
     public static bool GlobalInit;
-    
+
     // private static IList? _temporaryArrayStorage = null;
 
     public static object? ExecuteCode(VMCode? code, IStackContextSelf? obj, ObjectDefinition? objectDefinition = null, EventType eventType = EventType.None, int eventIndex = 0, object?[]? args = null)
@@ -191,6 +199,10 @@ public static partial class VMExecutor
             ObjectDefinition = objectDefinition,
         };
 
+        // Everything this code pushes onto EnvStack -- its own frame, plus whatever `with` blocks
+        // push while it runs -- has to be gone again by the time we return. See the unwind below.
+        var envDepthOnEntry = EnvStack.Count;
+
         // Make the current object the current instance
         EnvStack.Push(newCtx);
 
@@ -218,7 +230,7 @@ public static partial class VMExecutor
         var call = new VMCallFrame
         {
             CodeName = codeName,
-            
+
             Stack = new(),
             Locals = new(),
             ReturnValue = defaultReturnValue,
@@ -300,7 +312,10 @@ public static partial class VMExecutor
                 }
 
                 DebugLog.LogError($"Execution of instruction {code.Instructions[Call.InstructionIndex].Raw} (Index: {Call.InstructionIndex}, Label: {lastLabel}) in script {codeName} failed : {data}");
-                DebugLog.PrintCallStack(DebugLog.LogType.Error);
+
+                // With the disassembly of every frame, not just this one: the value that killed the
+                // instruction was as often built by a caller and passed down as it was built here.
+                DebugLog.PrintCallStack(DebugLog.LogType.Error, withDisassembly: true);
 
                 //Debug.Break();
                 break;
@@ -339,7 +354,20 @@ public static partial class VMExecutor
 
         // Current object has finished executing, remove from stack
         var returnValue = Call.ReturnValue;
-        EnvStack.Pop();
+
+        // Normally that's exactly one frame -- this code's own -- because a `with` block's frames
+        // (a null marker from PUSHENV plus one per instance) are unwound by the POPENV that ends
+        // it. But we also leave the loop above WITHOUT reaching that POPENV: an instruction that
+        // failed breaks straight out. Popping a fixed one frame then took a stranded `with` frame
+        // instead of ours, so the *caller* carried on with a `self` belonging to whatever instance
+        // the dead `with` happened to be iterating, and every later read of the caller's own
+        // variables silently missed. (Spook Jam's oDB_Witch: one throw inside scrDB_PreFire's
+        // `with (oDB_Bullet)` and the rest of the witch's Step event ran as a bullet.) An error is
+        // already bad; it must at least stay local to the code it happened in.
+        while (EnvStack.Count > envDepthOnEntry)
+        {
+            EnvStack.Pop();
+        }
 
         CallStack.Pop();
 
@@ -366,7 +394,7 @@ public static partial class VMExecutor
             System.Diagnostics.Debugger.Break();
         }
 
-        if (VerboseStackLogs) 
+        if (VerboseStackLogs)
             DebugLog.LogInfo($" - {instruction.Raw}");
         CurrentInstruction = instruction;
 
@@ -418,7 +446,7 @@ public static partial class VMExecutor
 
                 // first ??= 0;
                 // second ??= 0;
-                
+
                 // TODO: array cmp
 
                 if (first == null || second == null)
@@ -468,6 +496,45 @@ public static partial class VMExecutor
                             break;
                         case VMComparison.GT:
                             Call.Stack.Push(CustomMath.ApproxGreaterThan(firstNumber, secondNumber), VMType.b);
+                            break;
+                        case VMComparison.None:
+                        default:
+                            throw new ArgumentOutOfRangeException();
+                    }
+                }
+                else if (first is string firstText && second is string secondText)
+                {
+                    // Two strings are compared AS strings, whatever they happen to look like.
+                    //
+                    // GameMaker never reads a string as a number to compare it with another string,
+                    // and the difference is not academic: parsing both sides first makes "1e2" equal
+                    // "100", and -- because a value too large to be a double parses as infinity and
+                    // ApproxEqual subtracts its arguments -- it makes "9e424042" *unequal to
+                    // itself*, since infinity minus infinity is NaN. That is how a game comparing a
+                    // string id `9e424042` with `if (id == "9e424042")` silently took the wrong
+                    // branch, with nothing anywhere reporting a failure.
+                    //
+                    // Numeric leniency is kept for the mixed case below, where one side really is a
+                    // number: that is where a game comparing `argument0` to "5" needs it.
+                    switch (instruction.Comparison)
+                    {
+                        case VMComparison.EQ:
+                            Call.Stack.Push(firstText == secondText, VMType.b);
+                            break;
+                        case VMComparison.NEQ:
+                            Call.Stack.Push(firstText != secondText, VMType.b);
+                            break;
+                        case VMComparison.LT:
+                            Call.Stack.Push(string.CompareOrdinal(firstText, secondText) < 0, VMType.b);
+                            break;
+                        case VMComparison.LTE:
+                            Call.Stack.Push(string.CompareOrdinal(firstText, secondText) <= 0, VMType.b);
+                            break;
+                        case VMComparison.GT:
+                            Call.Stack.Push(string.CompareOrdinal(firstText, secondText) > 0, VMType.b);
+                            break;
+                        case VMComparison.GTE:
+                            Call.Stack.Push(string.CompareOrdinal(firstText, secondText) >= 0, VMType.b);
                             break;
                         case VMComparison.None:
                         default:
@@ -595,29 +662,29 @@ public static partial class VMExecutor
                 Call.Stack.Pop(instruction.TypeOne);
                 break;
             case VMOpcode.CALL:
-            {
-                var args = new object?[instruction.FunctionArgumentCount];
-
-                for (var i = 0; i < instruction.FunctionArgumentCount; i++)
                 {
-                    // args are always pushed as rvalues
-                    args[i] = Call.Stack.Pop(VMType.v);
-                }
+                    var args = new object?[instruction.FunctionArgumentCount];
 
-                if (ScriptResolver.ScriptsByName.TryGetValue(instruction.FunctionName, out var scriptName))
-                {
-                    Call.Stack.Push(ExecuteCode(scriptName.GetCode(), Self.Self, Self.ObjectDefinition, args: args), VMType.v);
-                    break;
-                }
+                    for (var i = 0; i < instruction.FunctionArgumentCount; i++)
+                    {
+                        // args are always pushed as rvalues
+                        args[i] = Call.Stack.Pop(VMType.v);
+                    }
 
-                if (ScriptResolver.BuiltInFunctions.TryGetValue(instruction.FunctionName, out var builtInFunction))
-                {
-                    Call.Stack!.Push(builtInFunction!(args), VMType.v);
-                    break;
-                }
+                    if (ScriptResolver.ScriptsByName.TryGetValue(instruction.FunctionName, out var scriptName))
+                    {
+                        Call.Stack.Push(ExecuteCode(scriptName.GetCode(), Self.Self, Self.ObjectDefinition, args: args), VMType.v);
+                        break;
+                    }
 
-                return (ExecutionResult.Failed, $"Can't resolve script {instruction.FunctionName} !");
-            }
+                    if (ScriptResolver.BuiltInFunctions.TryGetValue(instruction.FunctionName, out var builtInFunction))
+                    {
+                        Call.Stack!.Push(builtInFunction!(args), VMType.v);
+                        break;
+                    }
+
+                    return (ExecutionResult.Failed, $"Can't resolve script {instruction.FunctionName} !");
+                }
             case VMOpcode.PUSHENV:
                 return PUSHENV(instruction);
             case VMOpcode.POPENV:
@@ -651,26 +718,40 @@ public static partial class VMExecutor
             case VMOpcode.SHR:
                 return SHR(instruction);
             case VMOpcode.CHKINDEX:
-            {
-                // unused in ch2???? no clue what this does
-                // used for multi-dimensional array bounds checking. c# does that anyway so its probably fine
-                
-                var (index, type) = Call.Stack.Peek();
-
-                if (index is int || type is VMType.i || type is VMType.e) // do we check type idk
                 {
+                    // unused in ch2???? no clue what this does
+                    // used for multi-dimensional array bounds checking. c# does that anyway so its probably fine
+
+                    var (index, type) = Call.Stack.Peek();
+
+                    if (index is int || type is VMType.i || type is VMType.e) // do we check type idk
+                    {
+                        break;
+                    }
+
+                    throw new Exception($"CHKINDEX failed - {index} ({type})");
+                }
+            case VMOpcode.CHKNULLISH:
+                {
+                    // PEEKS, it does not pop: this is the `??` operator, and the value it is asking
+                    // about is also the operator's own result. The compiled shape is
+                    //
+                    //     push.v  <left>
+                    //     chknullish.e
+                    //     bf      <past the right-hand side>
+                    //     popz.v                    <- only reached when left IS nullish
+                    //     ...evaluate the right-hand side...
+                    //
+                    // so the not-nullish path branches away leaving <left> on the stack as the result,
+                    // and the nullish path discards it with that popz. Popping here left both paths one
+                    // value short: the popz then underflowed ("InvalidOperation_EmptyStack"), which
+                    // aborted the event. Every `a ?? b` in a GMS 2.3+ game hits this -- tijit engine 2
+                    // died on `arg1 ?? variable_struct_get(...)` in its settings accessor, which is
+                    // called for every setting it reads.
+                    var (value, _) = ((Stack<(object?, VMType)>)Call.Stack).Peek();
+                    Call.Stack.Push(value == null, VMType.b);
                     break;
                 }
-
-                throw new Exception($"CHKINDEX failed - {index} ({type})");
-            }
-            case VMOpcode.CHKNULLISH:
-            {
-                // TODO: is this right? remains to be seen
-                var value = Call.Stack.Pop(VMType.v);
-                Call.Stack.Push(value == null, VMType.b);
-                break;
-            }
             case VMOpcode.EXIT:
                 return (ExecutionResult.ReturnedValue, CompatFlags.ZeroReturnValue ? 0 : null);
             case VMOpcode.SETOWNER:
@@ -679,125 +760,144 @@ public static partial class VMExecutor
                 var id = Call.Stack.Pop(VMType.i).Conv<int>();
                 break;
             case VMOpcode.POPAF:
-            {
-                var index = Call.Stack.Pop(VMType.i).Conv<int>();
-                var array = Call.Stack.Pop(VMType.v).Conv<IList>();
-                
-                var value = Call.Stack.Pop(VMType.v);
-                
-                // by the magic of reference types this will be set properly
-                VariableResolver.ArraySet(index, value,
-                    () => array);
+                {
+                    var index = Call.Stack.Pop(VMType.i).Conv<int>();
+                    var array = Call.Stack.Pop(VMType.v).Conv<IList>();
 
-                break;
-            }
-            case VMOpcode.PUSHAF: 
-            {
-                var index = Call.Stack.Pop(VMType.i).Conv<int>();
-                var array = Call.Stack.Pop(VMType.v).Conv<IList>();
+                    var value = Call.Stack.Pop(VMType.v);
 
-                var value = array[index];
+                    // by the magic of reference types this will be set properly
+                    VariableResolver.ArraySet(index, value,
+                        () => array);
 
-                Call.Stack.Push(value, VMType.v);
+                    break;
+                }
+            case VMOpcode.PUSHAF:
+                {
+                    var index = Call.Stack.Pop(VMType.i).Conv<int>();
+                    var array = Call.Stack.Pop(VMType.v).Conv<IList>();
 
-                break;
-            }
+                    // Real GM never throws reading past an array's current bound -- it just yields
+                    // undefined (mirrors ArraySet's own graceful auto-grow on the write side, and the
+                    // "variable doesn't exist" push-undefined handling for missing instance variables).
+                    object? value = null;
+                    if (index >= 0 && index < array.Count)
+                    {
+                        value = array[index];
+                    }
+                    else
+                    {
+                        DebugLog.LogWarning($"Array index {index} out of bounds (count {array.Count}), pushing undefined.");
+                    }
+
+                    Call.Stack.Push(value, VMType.v);
+
+                    break;
+                }
             case VMOpcode.SAVEAREF:
-            {
-                // doing what the comment in Underanalyzer says makes everything break???
-                
-                // if (_temporaryArrayStorage != null) throw new Exception("savearef - array already stored");
-                // var wtfIsThis = Ctx.Stack.Pop(VMType.i);
-                // _temporaryArrayStorage = Ctx.Stack.Pop(VMType.v).Conv<IList>();
-                break;
-            }
+                {
+                    // doing what the comment in Underanalyzer says makes everything break???
+
+                    // if (_temporaryArrayStorage != null) throw new Exception("savearef - array already stored");
+                    // var wtfIsThis = Ctx.Stack.Pop(VMType.i);
+                    // _temporaryArrayStorage = Ctx.Stack.Pop(VMType.v).Conv<IList>();
+                    break;
+                }
             case VMOpcode.RESTOREAREF:
-            {
-                // doing what the comment in Underanalyzer says makes everything break???
-                
-                // if (_temporaryArrayStorage == null) throw new Exception("savearef - array not stored");
-                // Ctx.Stack.Push(_temporaryArrayStorage, VMType.v);
-                // _temporaryArrayStorage = null;
-                break;
-            }
+                {
+                    // doing what the comment in Underanalyzer says makes everything break???
+
+                    // if (_temporaryArrayStorage == null) throw new Exception("savearef - array not stored");
+                    // Ctx.Stack.Push(_temporaryArrayStorage, VMType.v);
+                    // _temporaryArrayStorage = null;
+                    break;
+                }
             case VMOpcode.CALLV:
-            {
-                var method = FetchMethod(Call.Stack.Pop(VMType.v), instruction.IntData);
-                var self = Call.Stack.Pop(VMType.v);
-
-                var args = new object?[instruction.IntData];
-
-                for (var i = 0; i < instruction.IntData; i++)
                 {
-                    // args are always pushed as rvalues
-                    args[i] = Call.Stack.Pop(VMType.v);
+                    var method = FetchMethod(Call.Stack.Pop(VMType.v), instruction.IntData);
+                    var self = Call.Stack.Pop(VMType.v);
+
+                    var args = new object?[instruction.IntData];
+
+                    for (var i = 0; i < instruction.IntData; i++)
+                    {
+                        // args are always pushed as rvalues
+                        args[i] = Call.Stack.Pop(VMType.v);
+                    }
+
+                    if (method == null)
+                    {
+                        throw new NotImplementedException("method is null");
+                    }
+
+                    var context = method.inst;
+                    if (method.inst is null && self is not null)
+                    {
+                        context = FetchSelf(self);
+                    }
+
+                    //DebugLog.LogInfo($"CALLV {method.code.Name} self:{gmSelf.Definition.Name} argCount:{args.Length}");
+
+                    Call.Stack.Push(ExecuteCode(method.func.GetCode(), context, method.inst is GamemakerObject gml ? gml.Definition : null, args: args), VMType.v);
+
+                    break;
                 }
-
-                if (method == null)
-                {
-                    throw new NotImplementedException("method is null");
-                }
-
-                var context = method.inst;
-                if (method.inst is null && self is not null)
-                {
-                    context = FetchSelf(self);
-                }
-
-                //DebugLog.LogInfo($"CALLV {method.code.Name} self:{gmSelf.Definition.Name} argCount:{args.Length}");
-
-                Call.Stack.Push(ExecuteCode(method.func.GetCode(), context, method.inst is GamemakerObject gml ? gml.Definition : null, args: args), VMType.v);
-
-                break;
-            }
             case VMOpcode.ISSTATICOK:
-            {
-                var currentFunc = Call.Function;
-
-                if (currentFunc == null)
                 {
-                    // uhhhhh fuckin uhhh
-                    throw new NotImplementedException();
-                }
+                    var currentFunc = Call.Function;
 
-                Call.Stack.Push(currentFunc.HasStaticInitRan, VMType.b);
-                break;
-            }
+                    if (currentFunc == null)
+                    {
+                        // uhhhhh fuckin uhhh
+                        throw new NotImplementedException();
+                    }
+
+                    Call.Stack.Push(currentFunc.HasStaticInitRan, VMType.b);
+                    break;
+                }
             case VMOpcode.SETSTATIC:
-            {
-                var currentFunc = Call.Function;
-
-                if (currentFunc == null)
                 {
-                    // uhhhhh fuckin uhhh
-                    throw new NotImplementedException();
+                    var currentFunc = Call.Function;
+
+                    if (currentFunc == null)
+                    {
+                        // uhhhhh fuckin uhhh
+                        throw new NotImplementedException();
+                    }
+
+                    currentFunc.HasStaticInitRan = true;
+                    break;
                 }
-
-                currentFunc.HasStaticInitRan = true;
-                break;
-            }
             case VMOpcode.PUSHREF:
-            {
-                var encodedInt = instruction.IntData;
+                {
+                    var encodedInt = instruction.IntData;
 
-                var assetReferenceId = encodedInt & 0xFFFFFF;
-                var assetReferenceType = (AssetType)(encodedInt >> 24);
+                    var assetReferenceId = encodedInt & 0xFFFFFF;
+                    var assetReferenceType = (AssetType)(encodedInt >> 24);
 
-                // TODO actually push an asset reference object! this is super hacky and dumb and bad and will inevitably break
-                Call.Stack.Push(assetReferenceId, VMType.v);
+                    // TODO actually push an asset reference object! this is super hacky and dumb and bad and will inevitably break
+                    Call.Stack.Push(assetReferenceId, VMType.v);
 
-                break;
-            }
+                    break;
+                }
             case VMOpcode.PUSHAC:
-            {
-                var index = Call.Stack.Pop(VMType.i).Conv<int>();
-                var array = Call.Stack.Pop(VMType.v).Conv<IList>();
-                
-                var value = array[index];
+                {
+                    var index = Call.Stack.Pop(VMType.i).Conv<int>();
+                    var array = Call.Stack.Pop(VMType.v).Conv<IList>();
 
-                Call.Stack.Push(value, VMType.v);
-                break;
-            }
+                    object? value = null;
+                    if (index >= 0 && index < array.Count)
+                    {
+                        value = array[index];
+                    }
+                    else
+                    {
+                        DebugLog.LogWarning($"Array index {index} out of bounds (count {array.Count}), pushing undefined.");
+                    }
+
+                    Call.Stack.Push(value, VMType.v);
+                    break;
+                }
             case VMOpcode.BREAK:
                 throw new UnreachableException("break is used as an extended opcode marker, so it should never show up as an instruction");
             default:
@@ -827,7 +927,7 @@ public static partial class VMExecutor
 
     internal static VMCode GenerateCodeForBuiltIn(string builtin, int nArgs)
     {
-        var code = new VMCode { LocalVariables = [], Name = $"GENERATED CALLV FOR {builtin}"};
+        var code = new VMCode { LocalVariables = [], Name = $"GENERATED CALLV FOR {builtin}" };
 
         for (var i = nArgs - 1; i >= 0; i--)
         {
@@ -902,14 +1002,22 @@ public static partial class VMExecutor
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
     };
 
+    // A ds_map/list "undefined" key coerces to this instead of a real null -- Dictionary<TKey,_>
+    // throws ArgumentNullException on a null key, but real GM just treats it as a key nothing else
+    // will ever equal (ds_map_exists etc. gracefully report "not found" rather than crashing).
+    private static readonly object UndefinedKey = new();
+
     public static object? DictHash(object? key)
     {
         // GenHash in cpp
-        
+
         var result = key;
 
         switch (key)
         {
+            case null:
+                result = UndefinedKey;
+                break;
             case int or long or short or double or bool:
                 result = key.Conv<double>();
                 break;
@@ -923,7 +1031,7 @@ public static partial class VMExecutor
     /// works with: all number types, string, bool, IList
     /// </summary>
     public static T Conv<T>(this object? @this) => (T)@this.Conv(typeof(T));
-    
+
     public static object Conv(this object? @this, Type type)
     {
         /*
@@ -958,16 +1066,22 @@ public static partial class VMExecutor
          * YYGetPtr / PTR_RValue
          * YYGetPtrOrInt
          */
-        
+
         // TODO: check all numeric primitives
 
         if (@this is null)
         {
             // Bool is the only thing that undefined can be converted to
             // (YYGetBool is the only function that checks for 0x5)
-            if (type == typeof(bool)) return false;
+            if (type == typeof(bool))
+                return false;
 
-            throw new ArgumentException($"Trying to convert undefined to {type}! Current script:{CallStack.First().CodeName}");
+            // FirstOrDefault: this message is built while throwing, and a conversion can happen
+            // with the call stack already unwound (anything inspecting a script's result does it
+            // outside the frame), where First() threw "Sequence contains no elements" and replaced
+            // the useful message with a LINQ one.
+            var script = CallStack.Count > 0 ? CallStack.Peek().CodeName : "<no script running>";
+            throw new ArgumentException($"Trying to convert undefined to {type}! Current script:{script}");
         }
 
         if (@this.GetType() == type)
@@ -982,12 +1096,22 @@ public static partial class VMExecutor
             // "numbers, minus signs, decimal points and exponential parts in the string are taken into account,
             // while other characters (such as letters) will cause an error to be thrown."
 
-            if (type == typeof(int)) return int.Parse(s);
-            if (type == typeof(short)) return short.Parse(s);
-            if (type == typeof(long)) return long.Parse(s);
-            
-            if (type == typeof(double)) return double.Parse(s);
-            if (type == typeof(float)) return float.Parse(s);
+            if (type == typeof(int))
+                return int.Parse(s);
+            if (type == typeof(short))
+                return short.Parse(s);
+            if (type == typeof(long))
+                return long.Parse(s);
+
+            // GML string->number coercion always uses "." as the decimal point regardless of the
+            // host's locale (see GameConverter.ConvertAssembly for the same fix, where this exact
+            // class of bug first surfaced under a non-English browser locale) -- parsing with the
+            // current culture would silently break real GML code like real("3.5") whenever the
+            // browser's locale uses "," for decimals instead.
+            if (type == typeof(double))
+                return double.Parse(s, System.Globalization.CultureInfo.InvariantCulture);
+            if (type == typeof(float))
+                return float.Parse(s, System.Globalization.CultureInfo.InvariantCulture);
 
             if (type == typeof(bool))
             {
@@ -1009,62 +1133,90 @@ public static partial class VMExecutor
         {
             var l = Convert.ToInt64(@this);
 
-            if (type == typeof(uint)) return (uint)l;
-            if (type == typeof(int)) return (int)l;
-            if (type == typeof(short)) return (short)l;
-            if (type == typeof(long)) return (long)l;
-            
-            if (type == typeof(double)) return (double)l;
-            if (type == typeof(float)) return (float)l;
-            
-            if (type == typeof(bool)) return l > 0;
-            
-            if (type == typeof(string)) return l.ToString(); // not sure if positive numbers need to have a "+" in front?
+            if (type == typeof(uint))
+                return (uint)l;
+            if (type == typeof(int))
+                return (int)l;
+            if (type == typeof(short))
+                return (short)l;
+            if (type == typeof(long))
+                return (long)l;
+
+            if (type == typeof(double))
+                return (double)l;
+            if (type == typeof(float))
+                return (float)l;
+
+            if (type == typeof(bool))
+                return l > 0;
+
+            if (type == typeof(string))
+                return l.ToString(); // not sure if positive numbers need to have a "+" in front?
         }
         else if (@this is bool b)
         {
-            if (type == typeof(int)) return (int)(b ? 1 : 0);
-            if (type == typeof(long)) return (long)(b ? 1 : 0);
-            if (type == typeof(short)) return (short)(b ? 1 : 0);
-            
-            if (type == typeof(double)) return (double)(b ? 1 : 0);
-            if (type == typeof(float)) return (float)(b ? 1 : 0);
-            
-            if (type == typeof(string)) return b ? "1" : "0"; // GM represents bools as integers
+            if (type == typeof(int))
+                return (int)(b ? 1 : 0);
+            if (type == typeof(long))
+                return (long)(b ? 1 : 0);
+            if (type == typeof(short))
+                return (short)(b ? 1 : 0);
+
+            if (type == typeof(double))
+                return (double)(b ? 1 : 0);
+            if (type == typeof(float))
+                return (float)(b ? 1 : 0);
+
+            if (type == typeof(string))
+                return b ? "1" : "0"; // GM represents bools as integers
         }
         else if (@this is double or float)
         {
             var d = Convert.ToDouble(@this);
 
-            if (type == typeof(double)) return (double)d;
-            if (type == typeof(float)) return (float)d;
+            if (type == typeof(double))
+                return (double)d;
+            if (type == typeof(float))
+                return (float)d;
 
-            if (type == typeof(int)) return (int)d;
-            if (type == typeof(long)) return (long)d;
-            if (type == typeof(short)) return (short)d;
-            
-            if (type == typeof(bool)) return d > 0.5; // https://manual.yoyogames.com/GameMaker_Language/GML_Reference/Variable_Functions/bool.htm
+            if (type == typeof(int))
+                return (int)d;
+            if (type == typeof(long))
+                return (long)d;
+            if (type == typeof(short))
+                return (short)d;
+
+            if (type == typeof(bool))
+                return d > 0.5; // https://manual.yoyogames.com/GameMaker_Language/GML_Reference/Variable_Functions/bool.htm
 
             if (type == typeof(string))
             {
                 var isInt = Math.Abs(d % 1) <= (double.Epsilon * 100);
                 // https://manual.yoyogames.com/GameMaker_Language/GML_Reference/Strings/string.htm
-                return isInt ? d.ToString("0") : d.ToString("0.00");
+                // GML's number->string formatting is always "." for the decimal point, regardless
+                // of locale (and must match what the double.Parse(..., InvariantCulture) fixes
+                // above expect when a game round-trips a formatted number back through real()) --
+                // without this, a comma-decimal browser locale would print "3,50" here.
+                return isInt
+                    ? d.ToString("0", System.Globalization.CultureInfo.InvariantCulture)
+                    : d.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
             }
-        } 
+        }
         else if (@this is IList array && type == typeof(IList))
         {
             return array;
         }
         else if (@this is Method)
         {
-            if (type == typeof(bool)) return true; // methods are always evaluated to true i think?
+            if (type == typeof(bool))
+                return true; // methods are always evaluated to true i think?
         }
         else if (@this is GMLObject)
         {
-            if (type == typeof(GMLObject)) return @this;
+            if (type == typeof(GMLObject))
+                return @this;
         }
-            
+
         throw new ArgumentException($"Don't know how to convert {@this} ({@this.GetType()}) to {type}");
     }
 

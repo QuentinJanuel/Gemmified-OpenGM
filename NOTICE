@@ -1,0 +1,27 @@
+Gemmified-OpenGM
+================
+
+A fork of OpenGM <https://github.com/misternebula/OpenGM> that builds the
+GameMaker Studio runner for WebAssembly and packages it as a GEMS-protocol plugin.
+
+It is based on upstream commit a23f7eea78173f46a5f70eb36c0bd0f11004c7b2
+(2026-07-14). Upstream commits after that one are not included.
+
+OpenGM is licensed MIT and so is this fork; see LICENSE. Copyright in the
+original work is retained by the OpenGM authors and contributors.
+Modifications in this fork are Copyright (c) 2026 Dapper Mink, under the same
+MIT licence.
+
+Third-party components
+----------------------
+
+UndertaleModTool <https://github.com/UnderminersTeam/UndertaleModTool>, by the
+Underminers team and contributors, is included as a git submodule
+(UndertaleModTool/) pointing at the fork
+<https://github.com/QuentinJanuel/UndertaleModTool>, branch gemmified. It is
+licensed GPL-3.0; see UndertaleModTool/LICENSE.txt. OpenGM and OpenGM.Wasm
+build against its UndertaleModLib project.
+
+Underanalyzer <https://github.com/UnderminersTeam/Underanalyzer> is a submodule
+of UndertaleModTool, at the commit UndertaleModTool pins. It is licensed
+MPL-2.0; see UndertaleModTool/Underanalyzer/LICENSE.

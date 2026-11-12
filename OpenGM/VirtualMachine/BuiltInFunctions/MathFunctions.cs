@@ -1,6 +1,7 @@
 ﻿using OpenGM.IO;
 using OpenGM.SerializedFiles;
 using System.Collections;
+using System.Globalization;
 using System.Text;
 
 namespace OpenGM.VirtualMachine.BuiltInFunctions;
@@ -43,8 +44,9 @@ public static class MathFunctions
         // seems to always be self, static, or null.
         // https://github.com/YoYoGames/GameMaker-HTML5/blob/develop/scripts/yyVariable.js#L279
         var struct_ref_or_instance_id = args[0];
-        
-        var method = args[1] switch {
+
+        var method = args[1] switch
+        {
             // pass by id - i really hope built in functions cant be used with method
             int value => new Method(ScriptResolver.ScriptsByIndex[value.Conv<int>() - GMConstants.FIRST_INSTANCE_ID]),
             // pass method directly
@@ -117,7 +119,7 @@ public static class MathFunctions
     public static object? array_length_2d(object?[] args)
     {
         // this actually has a second argument for getting the nth element. but its also deprecated so whatever
-        
+
         if (args[0] is not IList array)
         {
             return null;
@@ -142,6 +144,10 @@ public static class MathFunctions
         return array.Count;
     }
 
+    // @@array_get@@ is the compiler's own name for the same thing: GMS 2.3+ emits it where an array
+    // read isn't a plain `a[i]` on a named variable (through a struct member or a chained accessor,
+    // which is how tijit engine 2's audio code walks its track array).
+    [GMLFunction("@@array_get@@")]
     [GMLFunction("array_get")]
     public static object? array_get(object?[] args)
     {
@@ -166,8 +172,42 @@ public static class MathFunctions
 
     // array_set_pre
     // array_set_post
-    // array_get_2D
-    // array_set_2D
+    // A 2D array here is a list of lists (see array_length_2d), so both of these are just the 1D
+    // accessors applied twice -- the outer index picks the row, the inner one the column.
+
+    [GMLFunction("array_get_2D")]
+    public static object? array_get_2D(object?[] args)
+    {
+        var array = args[0].Conv<IList>();
+        var i = args[1].Conv<int>();
+        var j = args[2].Conv<int>();
+
+        if (i < 0 || i >= array.Count || array[i] is not IList row)
+        {
+            return null;
+        }
+
+        return j < 0 || j >= row.Count ? null : row[j];
+    }
+
+    [GMLFunction("array_set_2D")]
+    public static object? array_set_2D(object?[] args)
+    {
+        var array = args[0].Conv<IList>();
+        var i = args[1].Conv<int>();
+        var j = args[2].Conv<int>();
+        var value = args[3];
+
+        // Grow the outer array to reach row i, creating the row if it isn't one yet -- writing past
+        // the end is how GML builds a 2D array up in the first place.
+        VariableResolver.ArraySet(i, array.Count > i && array[i] is IList ? array[i] : new GMLArray(),
+            () => array);
+
+        VariableResolver.ArraySet(j, value, () => array[i]);
+
+        return null;
+    }
+
     // array_set_2D_pre
     // array_set_2D_post
 
@@ -525,7 +565,22 @@ public static class MathFunctions
     public static object round(object?[] args)
     {
         var num = args[0].Conv<double>();
-        return CustomMath.RoundToInt((float)num); // BUG: shouldnt this just do Math.Round?
+
+        // Banker's rounding (half to even) -- captured from GMS 1.4.9999:
+        //   round(0.5)=0  round(1.5)=2  round(2.5)=2  round(3.5)=4  round(-1.5)=-2  round(-2.5)=-2
+        // which is Math.Round's default, so the mode was never the problem. The two things that
+        // were:
+        //
+        //  - It rounded `(float)num`. Narrowing to single precision first snaps anything within
+        //    ~1e-7 of a midpoint *onto* that midpoint, where the to-even rule then sends it the
+        //    wrong way: GM answers round(0.5000000001) = 1 and round(2.5000000001) = 3, but as
+        //    floats those are exactly 0.5f and 2.5f, which round to 0 and 2.
+        //  - It returned `int`. GM returns a real, and games do round() large values --
+        //    round(2147483648.7) is 2147483649, which overflowed an int and came back negative.
+        var rounded = Math.Round(num, MidpointRounding.ToEven);
+
+        // round(-0.5) is -0.0 in IEEE, and GM prints that as "0" rather than "-0".
+        return rounded == 0 ? 0.0 : rounded;
     }
 
     [GMLFunction("floor")]
@@ -575,8 +630,19 @@ public static class MathFunctions
         return val * val;
     }
 
-    // exp
-    // ln
+    [GMLFunction("exp")]
+    public static object exp(object?[] args)
+    {
+        var val = args[0].Conv<double>();
+        return Math.Exp(val);
+    }
+
+    [GMLFunction("ln")]
+    public static object ln(object?[] args)
+    {
+        var val = args[0].Conv<double>();
+        return Math.Log(val);
+    }
 
     [GMLFunction("log2")]
     public static object log2(object?[] args)
@@ -639,8 +705,22 @@ public static class MathFunctions
         return Math.Acos(x);
     }
 
-    // arctan
-    // arctan2
+    [GMLFunction("arctan")]
+    public static object arctan(object?[] args)
+    {
+        var x = args[0].Conv<double>();
+        return Math.Atan(x); // radians
+    }
+
+    [GMLFunction("arctan2")]
+    public static object arctan2(object?[] args)
+    {
+        // GML's argument order is (y, x), like C's atan2 -- NOT (x, y).
+        var y = args[0].Conv<double>();
+        var x = args[1].Conv<double>();
+
+        return Math.Atan2(y, x); // radians
+    }
 
     [GMLFunction("dsin")]
     public static object dsin(object?[] args)
@@ -656,11 +736,45 @@ public static class MathFunctions
         return Math.Cos(val * CustomMath.Deg2Rad);
     }
 
-    // dtan
-    // darcsin
-    // darccos
-    // darctan
-    // darctan2
+    [GMLFunction("dtan")]
+    public static object dtan(object?[] args)
+    {
+        var a = args[0].Conv<double>(); // degrees
+        return Math.Tan(a * CustomMath.Deg2Rad);
+    }
+
+    // The d* inverse trig functions take the same argument as their radian counterparts and differ
+    // only in returning degrees.
+
+    [GMLFunction("darcsin")]
+    public static object darcsin(object?[] args)
+    {
+        var x = args[0].Conv<double>();
+        return Math.Asin(x) * CustomMath.Rad2Deg;
+    }
+
+    [GMLFunction("darccos")]
+    public static object darccos(object?[] args)
+    {
+        var x = args[0].Conv<double>();
+        return Math.Acos(x) * CustomMath.Rad2Deg;
+    }
+
+    [GMLFunction("darctan")]
+    public static object darctan(object?[] args)
+    {
+        var x = args[0].Conv<double>();
+        return Math.Atan(x) * CustomMath.Rad2Deg;
+    }
+
+    [GMLFunction("darctan2")]
+    public static object darctan2(object?[] args)
+    {
+        var y = args[0].Conv<double>();
+        var x = args[1].Conv<double>();
+
+        return Math.Atan2(y, x) * CustomMath.Rad2Deg;
+    }
 
     [GMLFunction("degtorad")]
     public static object degtorad(object?[] args)
@@ -718,6 +832,12 @@ public static class MathFunctions
         return arguments.Max();
     }
 
+    [GMLFunction("min3")]
+    public static object min3(object?[] args) => min(args);
+
+    [GMLFunction("max3")]
+    public static object max3(object?[] args) => max(args);
+
     [GMLFunction("mean")]
     public static object mean(object?[] args)
     {
@@ -767,19 +887,10 @@ public static class MathFunctions
         var min = args[1].Conv<double>();
         var max = args[2].Conv<double>();
 
-        // TODO : do we need to use Epsilon here?
-
-        if (val <= min)
-        {
-            return min;
-        }
-
-        if (val >= max)
-        {
-            return max;
-        }
-
-        return val;
+        // min(max(val, minv), maxv), so that when the bounds are given backwards the *max* wins.
+        // Captured from GMS 1.4.9999: clamp(5, 10, 0) is 0, not 10 -- this used to test val <= min
+        // first and return the min, which is the opposite answer for every inverted-bounds call.
+        return Math.Min(Math.Max(val, min), max);
     }
 
     [GMLFunction("lerp")]
@@ -928,9 +1039,14 @@ public static class MathFunctions
                 var afterTwoDigits = num % 0.01f;
                 var truncated = num - afterTwoDigits;
 
+                // InvariantCulture, not the machine's: GML's number->string always uses "." for the
+                // decimal point regardless of locale, and VMExecutor.Conv's own double->string
+                // branch already says so. Without it, a French-locale machine formats 567.4 as
+                // "567,4" -- which then fails to parse back through real(), and quietly corrupts
+                // any game that builds a number into a string and reads it again.
                 return (truncated % 1) == 0
-                    ? truncated.ToString()
-                    : Math.Round(truncated, 2).ToString();
+                    ? truncated.ToString(CultureInfo.InvariantCulture)
+                    : Math.Round(truncated, 2).ToString(CultureInfo.InvariantCulture);
             }
             else if (valueOrFormat is GMLObject obj)
             {
@@ -962,27 +1078,20 @@ public static class MathFunctions
         var total = args[1].Conv<int>();
         var dec = args[2].Conv<int>();
 
-        // TODO : is a negative sign included in the number of digits??
+        // `dec` decimal places, then space-padded on the left to `total` characters. Verified against
+        // GameMaker Studio 1.4.9999 (a probe project): string_format(1, 1, 8) is "1.00000000" and
+        // string_format(3.9999983310699463, 1, 8) is "3.99999833".
+        //
+        // This was doing something quite different, and wrong twice over. A whole number returned
+        // early with no decimals at all ("1" instead of "1.00000000"), and everything else took a
+        // *substring of the fractional part's decimal text*, which falls apart the moment that text
+        // isn't a plain 0.xxx: for 4.000000000000002 the fractional part stringifies as
+        // "1.7763568394002505E-15", and characters 2..9 of that are "77635683", so the answer came
+        // back as "4.77635683". Small fractional parts are exactly what you get from accumulating a
+        // float, so this misreported image_index, timers, and anything else built by addition.
+        var result = val.ToString("F" + CustomMath.Max(dec, 0), CultureInfo.InvariantCulture);
 
-        var integral = Math.Truncate(val);
-        var integralString = integral.ToString().PadLeft(total);
-
-        // if val is an integer
-        if (val.ToString().Length == integral.ToString().Length)
-        {
-            return integralString;
-        }
-
-        var fractional = val - integral;
-        var fractionalString = "";
-        if (dec > 0)
-        {
-            var start = 2;
-            var end = start + dec;
-            fractionalString = "." + fractional.ToString().PadRight(end, '0')[start..end];
-        }
-
-        return integralString + fractionalString;
+        return result.PadLeft(total);
     }
 
     [GMLFunction("chr")]
@@ -1028,6 +1137,55 @@ public static class MathFunctions
         }
 
         return str.Length;
+    }
+
+    /// <summary>
+    /// The length in BYTES rather than characters -- Studio's strings are UTF-8, so this is only
+    /// the same as <see cref="string_length"/> for pure-ASCII text.
+    /// </summary>
+    [GMLFunction("string_byte_length")]
+    public static object string_byte_length(object?[] args)
+    {
+        var str = args[0].Conv<string>();
+
+        if (string.IsNullOrEmpty(str))
+        {
+            return 0;
+        }
+
+        return Encoding.UTF8.GetByteCount(str);
+    }
+
+    /// <summary>The <paramref name="args"/>[1]'th byte (1-based) of the string's UTF-8 encoding, or 0 if out of range.</summary>
+    [GMLFunction("string_byte_at")]
+    public static object string_byte_at(object?[] args)
+    {
+        var str = args[0].Conv<string>();
+        var index = args[1].Conv<int>();
+
+        if (string.IsNullOrEmpty(str))
+        {
+            return 0;
+        }
+
+        var bytes = Encoding.UTF8.GetBytes(str);
+
+        // Real GM reads whatever happens to be at that address for an out-of-range index; return 0
+        // instead, matching what OpenGMK settled on for the same function.
+        if (index < 1 || index > bytes.Length)
+        {
+            return 0;
+        }
+
+        return (int)bytes[index - 1];
+    }
+
+    /// <summary>The single character for a byte value, i.e. <c>chr</c> over the ANSI (Latin-1) code page.</summary>
+    [GMLFunction("ansi_char")]
+    public static object ansi_char(object?[] args)
+    {
+        var val = args[0].Conv<int>();
+        return ((char)(byte)val).ToString();
     }
 
     [GMLFunction("string_pos")]
@@ -1262,7 +1420,7 @@ public static class MathFunctions
         // TODO: this probably sucks
         var list = (IEnumerable<string>)args[1]!;
         var sub = "";
-        for (;;)
+        for (; ; )
         {
             sub = list.FirstOrDefault(s => str.StartsWith(s) || str.EndsWith(s));
             if (sub is null)
@@ -1318,6 +1476,130 @@ public static class MathFunctions
         }
 
         return text.Replace('#', '\n');
+    }
+
+    [GMLFunction("md5_string_unicode")]
+    public static object md5_string_unicode(object?[] args)
+    {
+        var text = args[0].Conv<string>();
+        var bytes = System.Text.Encoding.Unicode.GetBytes(text); // GM8's "unicode" = UTF-16LE
+        var hash = MD5Managed.HashData(bytes);
+        return Convert.ToHexStringLower(hash);
+    }
+
+    [GMLFunction("md5_string_utf8")]
+    public static object md5_string_utf8(object?[] args)
+    {
+        var text = args[0].Conv<string>();
+        var bytes = System.Text.Encoding.UTF8.GetBytes(text);
+        var hash = MD5Managed.HashData(bytes);
+        return Convert.ToHexStringLower(hash);
+    }
+
+    [GMLFunction("base64_encode")]
+    public static object base64_encode(object?[] args)
+    {
+        var text = args[0].Conv<string>();
+        var bytes = System.Text.Encoding.UTF8.GetBytes(text);
+        return Convert.ToBase64String(bytes);
+    }
+
+    [GMLFunction("base64_decode")]
+    public static object base64_decode(object?[] args)
+    {
+        var text = args[0].Conv<string>();
+        var bytes = Convert.FromBase64String(text);
+        return System.Text.Encoding.UTF8.GetString(bytes);
+    }
+
+    [GMLFunction("point_distance_3d")]
+    public static object point_distance_3d(object?[] args)
+    {
+        var x1 = args[0].Conv<double>();
+        var y1 = args[1].Conv<double>();
+        var z1 = args[2].Conv<double>();
+        var x2 = args[3].Conv<double>();
+        var y2 = args[4].Conv<double>();
+        var z2 = args[5].Conv<double>();
+
+        var dx = x2 - x1;
+        var dy = y2 - y1;
+        var dz = z2 - z1;
+
+        return Math.Sqrt((dx * dx) + (dy * dy) + (dz * dz));
+    }
+
+    /// <summary>
+    /// The plain dot product, NOT the normalised one -- GameMaker Studio splits the two into
+    /// separate functions (<c>dot_product_normalised</c> below), unlike GM8, whose single
+    /// <c>dot_product</c> normalised its inputs first (see OpenGMK's own gml/kernel.rs, which
+    /// reimplements GM8 rather than Studio).
+    /// </summary>
+    [GMLFunction("dot_product")]
+    public static object dot_product(object?[] args)
+    {
+        var x1 = args[0].Conv<double>();
+        var y1 = args[1].Conv<double>();
+        var x2 = args[2].Conv<double>();
+        var y2 = args[3].Conv<double>();
+
+        return (x1 * x2) + (y1 * y2);
+    }
+
+    [GMLFunction("dot_product_3d")]
+    public static object dot_product_3d(object?[] args)
+    {
+        var x1 = args[0].Conv<double>();
+        var y1 = args[1].Conv<double>();
+        var z1 = args[2].Conv<double>();
+        var x2 = args[3].Conv<double>();
+        var y2 = args[4].Conv<double>();
+        var z2 = args[5].Conv<double>();
+
+        return (x1 * x2) + (y1 * y2) + (z1 * z2);
+    }
+
+    /// <summary>Scales both vectors to unit length first, so the result is the cosine of the angle between them.</summary>
+    [GMLFunction("dot_product_normalised")]
+    public static object dot_product_normalised(object?[] args)
+    {
+        var x1 = args[0].Conv<double>();
+        var y1 = args[1].Conv<double>();
+        var x2 = args[2].Conv<double>();
+        var y2 = args[3].Conv<double>();
+
+        var l1 = Math.Sqrt((x1 * x1) + (y1 * y1));
+        var l2 = Math.Sqrt((x2 * x2) + (y2 * y2));
+
+        // A zero-length vector has no direction to compare; GM's own divide-by-zero would give a
+        // NaN that then poisons whatever the caller does with it.
+        if (l1 == 0 || l2 == 0)
+        {
+            return 0d;
+        }
+
+        return (((x1 / l1) * (x2 / l2)) + ((y1 / l1) * (y2 / l2)));
+    }
+
+    [GMLFunction("dot_product_3d_normalised")]
+    public static object dot_product_3d_normalised(object?[] args)
+    {
+        var x1 = args[0].Conv<double>();
+        var y1 = args[1].Conv<double>();
+        var z1 = args[2].Conv<double>();
+        var x2 = args[3].Conv<double>();
+        var y2 = args[4].Conv<double>();
+        var z2 = args[5].Conv<double>();
+
+        var l1 = Math.Sqrt((x1 * x1) + (y1 * y1) + (z1 * z1));
+        var l2 = Math.Sqrt((x2 * x2) + (y2 * y2) + (z2 * z2));
+
+        if (l1 == 0 || l2 == 0)
+        {
+            return 0d;
+        }
+
+        return (((x1 / l1) * (x2 / l2)) + ((y1 / l1) * (y2 / l2)) + ((z1 / l1) * (z2 / l2)));
     }
 
     [GMLFunction("point_distance")]

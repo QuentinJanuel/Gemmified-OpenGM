@@ -4,7 +4,7 @@ namespace OpenGM
 {
     [AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
     public class GMLFunctionAttribute(
-        string functionName, 
+        string functionName,
         GMLFunctionFlags functionFlags = 0,
         string? since = null,
         string? before = null,

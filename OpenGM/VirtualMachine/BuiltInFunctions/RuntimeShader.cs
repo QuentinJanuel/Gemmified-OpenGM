@@ -1,6 +1,7 @@
 ﻿using OpenTK.Graphics.OpenGL4;
 
 namespace OpenGM.VirtualMachine.BuiltInFunctions;
+
 public class RuntimeShader
 {
     public string Name = "";

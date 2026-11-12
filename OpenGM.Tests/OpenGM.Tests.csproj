@@ -24,6 +24,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\OpenGM\OpenGM.csproj" />
+    <!-- The browser build's filesystem: plain C#, but only OpenGM.Wasm compiles it. -->
+    <Compile Include="..\OpenGM.Wasm\Vfs.cs" Link="Vfs.cs" />
   </ItemGroup>
 
   <ItemGroup>

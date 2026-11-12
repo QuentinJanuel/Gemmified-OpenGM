@@ -6,6 +6,7 @@ using System.Text;
 using System.Threading.Tasks;
 
 namespace OpenGM.Rendering;
+
 public class RuntimeView
 {
     public int ViewIndex;
@@ -65,5 +66,8 @@ public class RuntimeView
     }
     // index
     public int SurfaceId = -1; // TODO: set
+    // TODO: not actually followed -- no per-step camera-tracking logic reads this yet, but the
+    // storage itself is real (matches SurfaceId's own existing partial-implementation pattern above).
+    public int FollowObject = -1;
     public Camera Camera = new();
 }

@@ -103,7 +103,7 @@ public class Camera
             _viewMatrix[2, 0]
         ).Normalized();
     }
-    
+
     /// <summary>
     /// update matrices from view fields (x and y are usually also view fields)
     /// </summary>
@@ -118,18 +118,6 @@ public class Camera
 
         SetViewMat(viewMat);
         SetProjMat(projMat);
-    }
-
-    /// <summary>
-    /// apply camera matrices to uniforms
-    /// </summary>
-    public void ApplyMatrices()
-    {
-        // TODO: global view/room extent stuff, used for culling and for tiled stuff
-        
-        // rn this stuff is used cuz we set view area. this also sets view area. idk if its needed tho
-        
-        ShaderManager.LoadMatrices(this);
     }
 
     /// <summary>

@@ -25,9 +25,17 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- So the tests can reach the engine's own internals. OpenGM.Tests drives real bytecode
+         against real managers; making a type public purely to be able to assert on it would widen
+         the surface for everyone to serve one caller. -->
+    <InternalsVisibleTo Include="OpenGM.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="MemoryPack" Version="1.21.4" />
     <PackageReference Include="NAudio" Version="2.3.0" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+    <PackageReference Include="NLayer" Version="2.0.1" />
     <PackageReference Include="OpenTK" Version="4.9.4" />
     <PackageReference Include="StbImageSharp" Version="2.30.15" />
     <PackageReference Include="StbVorbisSharp" Version="1.22.4" />
@@ -35,6 +43,12 @@
 
   <ItemGroup>
     <ProjectReference Include="..\UndertaleModTool\UndertaleModLib\UndertaleModLib.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- part_type_shape's fourteen built-in particle textures, which ship with a real GameMaker
+         runner rather than with the game. See Particles/ParticleShapes.cs. -->
+    <EmbeddedResource Include="Particles\particles.dat" LogicalName="OpenGM.Particles.particles.dat" />
+
     <ProjectReference Include="..\MotionTK\MotionTK.csproj" />
   </ItemGroup>
 

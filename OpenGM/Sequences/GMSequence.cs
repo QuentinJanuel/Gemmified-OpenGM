@@ -532,6 +532,7 @@ public class GMSequence : DrawWithDepth
                         obj.NextActive = false;
                     }
                 }
+#if !BROWSER
                 else if (trackType == TrackType.Audio)
                 {
                     SoundFunctions.audio_emitter_gain([trackInstance.emitterIndex, trackInstance.gain]);
@@ -548,6 +549,7 @@ public class GMSequence : DrawWithDepth
                         SoundFunctions.audio_stop_sound([trackInstance.soundIndex]);
                     }
                 }
+#endif
                 else if (trackType == TrackType.Text)
                 {
                     var c = trackInstance.colormultiply.ABGRToCol4(1);

@@ -13,6 +13,22 @@ public static partial class VMExecutor
         var dupSize = instruction.IntData;
         var dupSwapSize = instruction.SecondIntData >> 3;
 
+        if (dupType == VMType.e)
+        {
+            // A `dup.e` is really a dup.v whose two size operands are encoded the other way round,
+            // so that the bottom half can be bigger than the operand it normally shares a byte with
+            // (Underanalyzer's BlockSimulator does exactly this, and this method is otherwise a
+            // transcription of it -- this case was the one line missing).
+            //
+            // Taken at face value instead, the sizes are computed against a 4-byte type while the
+            // stack actually holds 16-byte Variables, so the pop loop overshoots, `size` goes
+            // negative and the "read too much data" guard below throws -- which aborts the calling
+            // event. `a.b()` on the result of a call compiles to this: tijit engine 2's getCollider
+            // is `instance_create(0, 0, collider).reset()`, and it died there every time.
+            dupTypeSize = VMTypeToSize(VMType.v);
+            (dupSize, dupSwapSize) = (dupSwapSize, dupSize);
+        }
+
         if (VerboseStackLogs)
         {
             DebugLog.Log($"DoDup dupType:{dupType} dupTypeSize:{dupTypeSize} STACK : ");

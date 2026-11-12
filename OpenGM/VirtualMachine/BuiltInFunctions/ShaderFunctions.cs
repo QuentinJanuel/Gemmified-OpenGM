@@ -31,6 +31,16 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return ShaderManager.CurrentShaderIndex;
         }
 
+        // Games commonly fetch a uniform's location from one shader and reuse the raw handle while
+        // a DIFFERENT (but similarly-laid-out) shader is bound -- fine on desktop GL, where a
+        // location is just a plain int, but WebGL's getUniformLocation return value is bound to the
+        // program it came from and throws INVALID_OPERATION if used while another program is
+        // active. So instead of handing back that raw, program-bound location, we hand back a
+        // synthetic handle carrying just the uniform NAME, and re-resolve it against whichever
+        // program is actually active at each shader_set_uniform_* call (see ResolveUniformLocation).
+        private static readonly Dictionary<int, string> _uniformHandleNames = new();
+        private static int _nextUniformHandle = -2;
+
         [GMLFunction("shader_get_uniform")]
         public static object? shader_get_uniform(object?[] args)
         {
@@ -44,7 +54,21 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
                 return -1;
             }
 
-            return shaderUniform.Location;
+            var handle = _nextUniformHandle--;
+            _uniformHandleNames[handle] = uniform;
+            return handle;
+        }
+
+        private static int ResolveUniformLocation(int handle)
+        {
+            if (!_uniformHandleNames.TryGetValue(handle, out var name))
+            {
+                // not one of our synthetic handles (e.g. came from somewhere that still hands back
+                // a raw location) -- use it as-is against whatever's currently bound
+                return handle;
+            }
+
+            return GL.GetUniformLocation(ShaderManager.CurrentProgramID, name);
         }
 
         [GMLFunction("shader_get_sampler_index")]
@@ -62,7 +86,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         [GMLFunction("shader_set_uniform_i")]
         public static object? shader_set_uniform_i(object?[] args)
         {
-            var handle = args[0].Conv<int>();
+            var handle = ResolveUniformLocation(args[0].Conv<int>());
 
             if (handle == -1)
             {
@@ -94,7 +118,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         [GMLFunction("shader_set_uniform_i_array")]
         public static object? shader_set_uniform_i_array(object?[] args)
         {
-            var handle = args[0].Conv<int>();
+            var handle = ResolveUniformLocation(args[0].Conv<int>());
             var arr = args[1].Conv<IList>().ConvAll<int>().ToArray();
 
             if (handle == -1)
@@ -110,7 +134,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         [GMLFunction("shader_set_uniform_f")]
         public static object? shader_set_uniform_f(object?[] args)
         {
-            var handle = args[0].Conv<int>();
+            var handle = ResolveUniformLocation(args[0].Conv<int>());
 
             if (handle == -1)
             {
@@ -142,7 +166,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         [GMLFunction("shader_set_uniform_f_array")]
         public static object? shader_set_uniform_f_array(object?[] args)
         {
-            var handle = args[0].Conv<int>();
+            var handle = ResolveUniformLocation(args[0].Conv<int>());
             var arr = args[1].Conv<IList>().ConvAll<float>().ToArray();
 
             if (handle == -1)
@@ -157,13 +181,37 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
 
         // shader_set_uniform_matrix
         // shader_set_uniform_matrix_array
-        // shader_is_compiled
-        // shaders_are_supported
+
+        [GMLFunction("shader_is_compiled")]
+        public static object? shader_is_compiled(object?[] args)
+        {
+            var shaderId = args[0].Conv<int>();
+
+            // ShaderManager.CompileShaders() compiles every shader resource up front and throws on
+            // the first failure, which aborts startup entirely rather than leaving a partially-
+            // compiled Shaders table -- so by the time any GML runs, every id in Shaders did compile.
+            return ShaderManager.Shaders.ContainsKey(shaderId);
+        }
+
+        [GMLFunction("shaders_are_supported")]
+        public static object? shaders_are_supported(object?[] args)
+        {
+            // We only run at all on top of WebGL, which guarantees GLSL ES shader support, so this
+            // is unconditionally true rather than a real capability check.
+            return true;
+        }
 
         [GMLFunction("texture_set_stage")]
         public static object? texture_set_stage(object?[] args)
         {
             var stage = args[0].Conv<int>();
+
+            if (args[1] is SurfaceTexture surfaceTex)
+            {
+                GL.BindTextureUnit(stage, surfaceTex.GLHandle);
+                return null;
+            }
+
             var tex = args[1] as SpritePageItem;
 
             if (tex == null)

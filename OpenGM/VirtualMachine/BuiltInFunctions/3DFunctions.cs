@@ -8,9 +8,179 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
 {
     public static class _3DFunctions
     {
-        public static Matrix4 ViewMatrix;
-        public static Matrix4 ProjectionMatrix;
-        public static Matrix4 WorldMatrix;
+        // The three matrices the shader draws with. Identity rather than Matrix4's own all-zero
+        // default, or every draw would degenerate to nothing the moment this class is touched, even
+        // for a game that never calls a single d3d_transform_*/matrix_set function.
+        //
+        // They are PROPERTIES so that writing one uploads it -- every d3d_transform_*, every
+        // matrix_set, every matrix stack pop, the model translation in D3DModelFunctions. Making
+        // that the setter's job is what stops the next one of those from being written and
+        // forgotten: they used to be plain fields that nothing on the draw path ever read (see
+        // GraphicsManager.UploadMatrices), so the whole family drew as if it had never been called.
+        //
+        // GraphicsManager.SetViewArea writes the *Field members directly and uploads once itself.
+        internal static Matrix4 ViewMatrixField = Matrix4.Identity;
+        internal static Matrix4 ProjectionMatrixField = Matrix4.Identity;
+        internal static Matrix4 WorldMatrixField = Matrix4.Identity;
+
+        public static Matrix4 ViewMatrix
+        {
+            get => ViewMatrixField;
+            set { ViewMatrixField = value; GraphicsManager.UploadMatrices(); }
+        }
+
+        public static Matrix4 ProjectionMatrix
+        {
+            get => ProjectionMatrixField;
+            set { ProjectionMatrixField = value; GraphicsManager.UploadMatrices(); }
+        }
+
+        public static Matrix4 WorldMatrix
+        {
+            get => WorldMatrixField;
+            set { WorldMatrixField = value; GraphicsManager.UploadMatrices(); }
+        }
+
+        [GMLFunction("d3d_start")]
+        public static object? d3d_start(object?[] args)
+        {
+            // no real 3D pipeline (2D-only renderer) - just needs to not crash D&D/legacy games that call it
+            return null;
+        }
+
+        [GMLFunction("d3d_end")]
+        public static object? d3d_end(object?[] args)
+        {
+            return null;
+        }
+
+        // The d3d_transform_* family manipulates the same WorldMatrix matrix_set/matrix_get expose
+        // (matrix type 2) -- ShaderManager.LoadMatrices feeds it into gm_Matrices, which the vertex
+        // shader applies to every 2D draw too (not just real 3D geometry), so GM8/GMS games often
+        // use it as the only way to rotate/scale draw calls that don't take their own angle
+        // argument (e.g. draw_sprite_part_ext, wrapped by this game's own draw_sprite_part_ext_rot).
+        //
+        // "add_*" composes onto the current transform in call order -- WorldMatrix * new, matching
+        // the same row-vector chaining ShaderManager.LoadMatrices already uses for world * view *
+        // projection -- so e.g. add_translation(-px,-py) then add_rotation_z(a) then
+        // add_translation(px,py) rotates around (px,py), applied in that exact sequence.
+
+        [GMLFunction("d3d_transform_set_identity")]
+        public static object? d3d_transform_set_identity(object?[] args)
+        {
+            WorldMatrix = Matrix4.Identity;
+            return null;
+        }
+
+        [GMLFunction("d3d_transform_set_translation")]
+        public static object? d3d_transform_set_translation(object?[] args)
+        {
+            WorldMatrix = Matrix4.CreateTranslation(args[0].Conv<float>(), args[1].Conv<float>(), args[2].Conv<float>());
+            return null;
+        }
+
+        [GMLFunction("d3d_transform_set_scaling")]
+        public static object? d3d_transform_set_scaling(object?[] args)
+        {
+            WorldMatrix = Matrix4.CreateScale(args[0].Conv<float>(), args[1].Conv<float>(), args[2].Conv<float>());
+            return null;
+        }
+
+        // Real GM's rotation direction/units match image_angle (degrees, counter-clockwise) -- see
+        // CustomMath.RotateAroundPoint's own "-angle" for the same screen-space (Y-down) conversion.
+        [GMLFunction("d3d_transform_set_rotation_x")]
+        public static object? d3d_transform_set_rotation_x(object?[] args)
+        {
+            WorldMatrix = Matrix4.CreateRotationX((float)(-args[0].Conv<double>() * CustomMath.Deg2Rad));
+            return null;
+        }
+
+        [GMLFunction("d3d_transform_set_rotation_y")]
+        public static object? d3d_transform_set_rotation_y(object?[] args)
+        {
+            WorldMatrix = Matrix4.CreateRotationY((float)(-args[0].Conv<double>() * CustomMath.Deg2Rad));
+            return null;
+        }
+
+        [GMLFunction("d3d_transform_set_rotation_z")]
+        public static object? d3d_transform_set_rotation_z(object?[] args)
+        {
+            WorldMatrix = Matrix4.CreateRotationZ((float)(-args[0].Conv<double>() * CustomMath.Deg2Rad));
+            return null;
+        }
+
+        [GMLFunction("d3d_transform_set_rotation_axis")]
+        public static object? d3d_transform_set_rotation_axis(object?[] args)
+        {
+            var axis = new Vector3(args[0].Conv<float>(), args[1].Conv<float>(), args[2].Conv<float>());
+            WorldMatrix = Matrix4.CreateFromAxisAngle(axis, (float)(-args[3].Conv<double>() * CustomMath.Deg2Rad));
+            return null;
+        }
+
+        [GMLFunction("d3d_transform_add_translation")]
+        public static object? d3d_transform_add_translation(object?[] args)
+        {
+            WorldMatrix *= Matrix4.CreateTranslation(args[0].Conv<float>(), args[1].Conv<float>(), args[2].Conv<float>());
+            return null;
+        }
+
+        [GMLFunction("d3d_transform_add_scaling")]
+        public static object? d3d_transform_add_scaling(object?[] args)
+        {
+            WorldMatrix *= Matrix4.CreateScale(args[0].Conv<float>(), args[1].Conv<float>(), args[2].Conv<float>());
+            return null;
+        }
+
+        [GMLFunction("d3d_transform_add_rotation_x")]
+        public static object? d3d_transform_add_rotation_x(object?[] args)
+        {
+            WorldMatrix *= Matrix4.CreateRotationX((float)(-args[0].Conv<double>() * CustomMath.Deg2Rad));
+            return null;
+        }
+
+        [GMLFunction("d3d_transform_add_rotation_y")]
+        public static object? d3d_transform_add_rotation_y(object?[] args)
+        {
+            WorldMatrix *= Matrix4.CreateRotationY((float)(-args[0].Conv<double>() * CustomMath.Deg2Rad));
+            return null;
+        }
+
+        [GMLFunction("d3d_transform_add_rotation_z")]
+        public static object? d3d_transform_add_rotation_z(object?[] args)
+        {
+            WorldMatrix *= Matrix4.CreateRotationZ((float)(-args[0].Conv<double>() * CustomMath.Deg2Rad));
+            return null;
+        }
+
+        [GMLFunction("d3d_transform_add_rotation_axis")]
+        public static object? d3d_transform_add_rotation_axis(object?[] args)
+        {
+            var axis = new Vector3(args[0].Conv<float>(), args[1].Conv<float>(), args[2].Conv<float>());
+            WorldMatrix *= Matrix4.CreateFromAxisAngle(axis, (float)(-args[3].Conv<double>() * CustomMath.Deg2Rad));
+            return null;
+        }
+
+        // The transform stack (push/pop/etc) isn't implemented -- no game in this codebase's test
+        // corpus so far uses it (only set_identity/add_translation/add_rotation_z, for one-shot
+        // pivot rotation around a single draw call), so these are safe no-ops rather than a real
+        // stack for now.
+        [GMLFunction("d3d_transform_stack_clear", GMLFunctionFlags.Stub)]
+        public static object? d3d_transform_stack_clear(object?[] args) => null;
+
+        [GMLFunction("d3d_transform_stack_empty", GMLFunctionFlags.Stub)]
+        public static object? d3d_transform_stack_empty(object?[] args) => true;
+
+        [GMLFunction("d3d_transform_stack_push", GMLFunctionFlags.Stub)]
+        public static object? d3d_transform_stack_push(object?[] args) => false;
+
+        [GMLFunction("d3d_transform_stack_pop", GMLFunctionFlags.Stub)]
+        public static object? d3d_transform_stack_pop(object?[] args) => false;
+
+        [GMLFunction("d3d_transform_stack_top", GMLFunctionFlags.Stub)]
+        public static object? d3d_transform_stack_top(object?[] args) => false;
+
+        [GMLFunction("d3d_transform_stack_discard", GMLFunctionFlags.Stub)]
+        public static object? d3d_transform_stack_discard(object?[] args) => false;
 
         private static Matrix4 ListToMatrix(IList list)
         {
@@ -45,6 +215,11 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
 
             return array;
         }
+
+        /// <summary>Exposed for MatrixStackFunctions, which shares this representation.</summary>
+        public static object? MatrixToListPublic(Matrix4 m) => MatrixToList(m);
+
+        public static Matrix4 ListToMatrixPublic(IList list) => ListToMatrix(list);
 
         [GMLFunction("matrix_get")]
         public static object? matrix_get(object?[] args)
@@ -254,8 +429,13 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         // matrix_stack_is_empty
 
         [GMLFunction("gpu_set_blendenable")]
+        // The pre-Studio name for the same thing: turn alpha blending off and what's drawn
+        // overwrites the target's own alpha instead of compositing onto it, which is how a game
+        // punches a shape's alpha into a surface.
+        [GMLFunction("draw_enable_alphablend", before: "2.0.0.0")]
         public static object? gpu_set_blendenable(object?[] args)
         {
+            GraphicsManager.FlushPolygonBatch(); // queued geometry belongs to the OLD GPU state
             var enable = args[0].Conv<bool>();
 
             // TODO : is this right?
@@ -283,8 +463,21 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             var colour = args[1].Conv<int>();
             var start = args[2].Conv<float>();
             var end = args[3].Conv<float>();
+            GpuStateFunctions.Current.FogEnabled = enable;
+            GpuStateFunctions.Current.FogColour = colour;
+            GpuStateFunctions.Current.FogStart = start;
+            GpuStateFunctions.Current.FogEnd = end;
 
-            GraphicsManager.SetFog(enable, colour.ABGRToCol4(), start, end);
+            // Opaque, explicitly. A GML colour is 24 bits of BGR with nothing in the top byte, and
+            // the no-alpha ABGRToCol4 overload reads that empty byte as alpha -- so every fog colour
+            // arrived as alpha 0. The shader's DoFog is `mix(SrcColour, gm_FogColour, fogval)`, alpha
+            // included, so fully-fogged geometry came out completely transparent instead of the fog
+            // colour: it was drawn, blended to nothing, and vanished.
+            //
+            // tijit engine 2 renders its blocks and spikes by drawing them fully fogged into a
+            // surface (fog range (-1, 1)) and keying on that surface's red channel, so this is the
+            // difference between a room's whole tileset being there and being invisible.
+            GraphicsManager.SetFog(enable, colour.ABGRToCol4(1.0), start, end);
 
             return null;
         }
@@ -306,7 +499,9 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         [GMLFunction("gpu_set_blendmode")]
         public static object? gpu_set_blendmode(object?[] args)
         {
+            GraphicsManager.FlushPolygonBatch(); // queued geometry belongs to the OLD GPU state
             var mode = args[0].Conv<int>();
+            GpuStateFunctions.Current.BlendMode = mode;
             Blendmode = mode;
 
             switch (mode)
@@ -337,10 +532,38 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
                     GL.BlendEquation(BlendEquationMode.FuncAdd);
                     break;
                 case 4:
-                    // bm_min
+                    // "bm_min" -- the name is UndertaleModLib's (BuiltinList.cs maps the constant 4
+                    // to it), not GameMaker's. GameMaker documents exactly four blend modes, all of
+                    // them plain factor pairs under the ADD equation: bm_normal, bm_add, bm_max and
+                    // bm_subtract, i.e. 0..3. 4 is past the end of that table, and everything about
+                    // how the only game to use it renders says GameMaker just leaves ordinary alpha
+                    // blending in place rather than selecting some fifth mode.
+                    //
+                    // Treating it as a genuine minimum blend cannot be right. I Wanna Spook Jam's
+                    // WetWookie lanterns are the whole corpus's only use of it (4 calls, both in
+                    // objWookLight/objWookLightControl). They build a lantern glow the ordinary way:
+                    // a white radial gradient (sprWookLight -- white throughout, alpha 253 at the
+                    // centre falling to ~2 at the rim) at image_alpha 0.6, then a *yellow* copy at
+                    // 0.5 and 0.8x scale over it. Layered through normal alpha compositing that is a
+                    // white-hot core with a warm yellow fringe, which is exactly how the fight looks
+                    // on Windows. Under any min-based blend it cannot look like that at all: the
+                    // destination those are drawn onto is the black darkness overlay, and min against
+                    // black stays black, so the yellow pass contributes literally nothing and the
+                    // "light" comes out unlit.
+                    //
+                    // Two wrong versions preceded this one, both worth recording. BlendEquation(Min)
+                    // (a) ignores the blend factors entirely in OpenGL -- unlike D3D9, which is what
+                    // GMS1.4 renders through -- collapsing to a per-channel min(src, dst), which
+                    // settles the overlay at min(0.3, texA * 0.6): the lantern's centre stays exactly
+                    // as dark as no lantern at all, and the darkness only lifts below texA = 0.5, a
+                    // razor-sharp circular threshold at the half-alpha radius, drawn as a hard-edged
+                    // dark disc. Destination-out (Zero, OneMinusSrcAlpha) fixed the disc but zeroes
+                    // the source colour, so the yellow pass still contributed nothing -- and on the
+                    // screen-space copy of the same draw (objWookLight's own Draw event) it scaled
+                    // the scene down by (1 - srcA), turning the glow into a black smudge.
                     GraphicsManager.PushMessage("BM_MIN");
-                    GL.BlendFunc(BlendingFactor.One, BlendingFactor.One);
-                    GL.BlendEquation(BlendEquationMode.Min);
+                    GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+                    GL.BlendEquation(BlendEquationMode.FuncAdd);
                     break;
                 case 5:
                     // bm_reverse_subtract
@@ -359,8 +582,15 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         [GMLFunction("gpu_set_blendmode_ext")]
         public static object? gpu_set_blendmode_ext(object?[] args)
         {
+            GraphicsManager.FlushPolygonBatch(); // queued geometry belongs to the OLD GPU state
             var src = args[0].Conv<int>();
             var dst = args[1].Conv<int>();
+            // Recorded so gpu_get_blendmode_src/_dest can read it back -- the save/restore idiom
+            // depends on the getters, and a getter that answers a default silently resets state.
+            GpuStateFunctions.Current.BlendSrc = src;
+            GpuStateFunctions.Current.BlendDest = dst;
+            GpuStateFunctions.Current.BlendSrcAlpha = src;
+            GpuStateFunctions.Current.BlendDestAlpha = dst;
 
             BlendingFactor GetBlend(int arg) => arg switch
             {
@@ -379,15 +609,25 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             };
 
             GL.BlendFunc(GetBlend(src), GetBlend(dst));
+            // gpu_set_blendmode sets an equation as well as a function (Min for bm_min, Subtract for
+            // bm_subtract/bm_reverse_subtract). This entry point only ever set the function, so a
+            // game that used one of those and then switched to an _ext mode kept the old equation
+            // and every later draw was still min'd/subtracted. The _ext modes are all plain
+            // src*sf + dst*df, so the equation always goes back to Add.
+            GL.BlendEquation(BlendEquationMode.FuncAdd);
             return null;
         }
 
         [GMLFunction("gpu_set_blendmode_ext_sepalpha")]
         public static object? gpu_set_blendmode_ext_sepalpha(object?[] args)
         {
+            GraphicsManager.FlushPolygonBatch(); // queued geometry belongs to the OLD GPU state
             var src = args[0].Conv<int>();
             var dest = args[1].Conv<int>();
             var alphasrc = args[2].Conv<int>();
+            GpuStateFunctions.Current.BlendSrc = src;
+            GpuStateFunctions.Current.BlendDest = dest;
+            GpuStateFunctions.Current.BlendSrcAlpha = alphasrc;
             var alphadest = args[3].Conv<int>();
 
             // TODO : theres gotta be a better way then repeating all these switch cases
@@ -424,7 +664,11 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
                 _ => throw new ArgumentException(),
             };
 
-            GL.BlendFuncSeparate(GetBlendSrc(src), GetBlendDest(src), GetBlendSrc(src), GetBlendDest(src));
+            // Was GetBlendSrc(src), GetBlendDest(src), GetBlendSrc(src), GetBlendDest(src) -- `src`
+            // four times, so `dest`, `alphasrc` and `alphadest` were all silently discarded and the
+            // colour pair was (src, src). The whole point of the sepalpha variant is the other three.
+            GL.BlendFuncSeparate(GetBlendSrc(src), GetBlendDest(dest), GetBlendSrc(alphasrc), GetBlendDest(alphadest));
+            GL.BlendEquation(BlendEquationMode.FuncAdd); // same reasoning as gpu_set_blendmode_ext
             return null;
         }
 
@@ -432,6 +676,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         [GMLFunction("gpu_set_colourwriteenable")]
         public static object? gpu_set_colourwriteenable(object?[] args)
         {
+            GraphicsManager.FlushPolygonBatch(); // queued geometry belongs to the OLD GPU state
             bool r;
             bool g;
             bool b;
@@ -460,7 +705,9 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         [GMLFunction("gpu_set_alphatestenable")]
         public static object? gpu_set_alphatestenable(object?[] args)
         {
+            GraphicsManager.FlushPolygonBatch(); // queued geometry belongs to the OLD GPU state
             var enabled = args[0].Conv<bool>();
+            GpuStateFunctions.Current.AlphaTestEnable = enabled;
             GL.Uniform1(ShaderManager.gm_AlphaTestEnabled, enabled ? 1 : 0);
             return null;
         }
@@ -468,27 +715,28 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         [GMLFunction("gpu_set_alphatestref")]
         public static object? gpu_set_alphatestref(object?[] args)
         {
+            GraphicsManager.FlushPolygonBatch(); // queued geometry belongs to the OLD GPU state
             var alphaRef = args[0].Conv<int>();
+            GpuStateFunctions.Current.AlphaTestRef = alphaRef;
             GL.Uniform1(ShaderManager.gm_AlphaRefValue, alphaRef / 255f);
             return null;
         }
 
-        [GMLFunction("gpu_set_texfilter", GMLFunctionFlags.Stub)]
-        public static object? gpu_set_texfilter(object?[] args)
+        [GMLFunction("d3d_set_fog")]
+        public static object? d3d_set_fog(object?[] args) => gpu_set_fog(args);
+
+        [GMLFunction("texture_set_interpolation")]
+        public static object? texture_set_interpolation(object?[] args)
         {
+            var enable = args[0].Conv<bool>();
+            PageManager.SetInterpolation(enable);
             return null;
         }
 
-        [GMLFunction("gpu_set_texfilter_ext", GMLFunctionFlags.Stub)]
-        public static object? gpu_set_texfilter_ext(object?[] args)
+        [GMLFunction("texture_get_interpolation")]
+        public static object texture_get_interpolation(object?[] args)
         {
-            return null;
-        }
-
-        [GMLFunction("gpu_set_texrepeat", GMLFunctionFlags.Stub)]
-        public static object? gpu_set_texrepeat(object?[] args)
-        {
-            return null;
+            return PageManager.TextureInterpolation;
         }
 
         // gpu_set_texrepeat_ext
@@ -524,10 +772,8 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         [GMLFunction("gpu_get_blendmode")]
         public static object? gpu_get_blendmode(object?[] args)
         {
-	        return Blendmode;
+            return Blendmode;
         }
-
-        // gpu_get_blendmode_ext
         // gpu_get_blendmode_ext_sepalpha
         // gpu_get_blendmode_src
         // gpu_get_blendmode_dest

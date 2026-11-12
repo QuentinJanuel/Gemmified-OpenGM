@@ -1,5 +1,6 @@
 using MemoryPack;
 using OpenGM.IO;
+using OpenGM.Loading;
 using OpenGM.VirtualMachine;
 using System.Diagnostics;
 using System.Linq.Expressions;
@@ -17,16 +18,48 @@ public static class ExtensionManager
     // https://stackoverflow.com/a/26700515
     // this is what lets us make delegates from a Type[] array
     // final element is return type, all elements before are argument types
-    private static readonly Func<Type[],Type> MakeNewCustomDelegate = (Func<Type[],Type>)Delegate.CreateDelegate(
+    //
+    // Lazy, not a plain static field: this reaches into System.Linq.Expressions' internal
+    // Reflection.Emit-based dynamic delegate type builder, which needs a JIT and is fundamentally
+    // unsupported under browser-wasm (throws PlatformNotSupportedException). The only call site
+    // (below) is already reached solely from the Windows-only native-DLL-extension path (gated by
+    // OperatingSystem.IsWindows() in Init()), so it's never actually needed off Windows -- but a
+    // plain static field initializer runs eagerly the moment this class is touched at all
+    // (e.g. Init() being called with zero real extensions to iterate), regardless of whether that
+    // branch is ever reached. Lazy<T> defers evaluation to the one call site that's already
+    // unreachable outside Windows.
+    private static readonly Lazy<Func<Type[], Type>> MakeNewCustomDelegate = new(() => (Func<Type[], Type>)Delegate.CreateDelegate(
         typeof(Func<Type[], Type>),
         typeof(Expression)
             .Assembly
             .GetType("System.Linq.Expressions.Compiler.DelegateHelpers")!
             .GetMethod("MakeNewCustomDelegate", BindingFlags.NonPublic | BindingFlags.Static)!
-    );
+    ));
 
     public static void Init()
     {
+        // Real GM runs each extension file's Init script once, automatically, before the first
+        // room's instances are even created -- games rely on it to seed globals their own GML code
+        // reads as early as the first room's Create events (see GameConverter.ExportExtensions's own
+        // doc comment on InitScript for a concrete example). This has to run regardless of file
+        // Kind (including GML, whose functions are just ordinary script entries already loaded
+        // elsewhere) and before the per-kind DLL/stub handling below, which `continue`s past GML
+        // files entirely.
+        foreach (var extension in Extensions)
+        {
+            foreach (var file in extension.Files)
+            {
+                if (file.InitScript == -1)
+                {
+                    continue;
+                }
+
+                var code = GameLoader.Codes[file.InitScript];
+                var dummy = new GMLObject();
+                VMExecutor.ExecuteCode(code, dummy);
+            }
+        }
+
         foreach (var extension in Extensions)
         {
             foreach (var file in extension.Files)
@@ -44,7 +77,26 @@ public static class ExtensionManager
 
                 if (!OperatingSystem.IsWindows())
                 {
-                    StubAllFuncs(file);
+                    // A handful of well-known extensions have a real (non-native-DLL) reimplementation
+                    // instead of just being stubbed out entirely -- see GMFileSystemExtension.cs's own
+                    // doc comment for why GMFile.dll specifically needs one (its save/load functions
+                    // returning "undefined" instead of real bytes crashes whatever script called them).
+                    if (file.Name.Equals("GMFile.dll", StringComparison.OrdinalIgnoreCase))
+                    {
+                        IO.GMFileSystemExtension.Register(file);
+                    }
+                    else if (file.Name.Equals("GMIni.dll", StringComparison.OrdinalIgnoreCase))
+                    {
+                        IO.GMIniExtension.Register(file);
+                    }
+                    else if (file.Name.Equals("GMResource.dll", StringComparison.OrdinalIgnoreCase))
+                    {
+                        IO.GMResourceExtension.Register(file);
+                    }
+                    else
+                    {
+                        StubAllFuncs(file);
+                    }
                     continue;
                 }
 
@@ -112,7 +164,7 @@ public static class ExtensionManager
                     DebugLog.LogVerbose($"{func.ExternalName}({func.Arguments.Count} args): 0x{funcPtr:X16}");
 
                     // create delegate type
-                    var deleType = MakeNewCustomDelegate([.. types]);
+                    var deleType = MakeNewCustomDelegate.Value([.. types]);
 
                     // convert the address of our external function to said delegate type
                     var dele = Marshal.GetDelegateForFunctionPointer(funcPtr, deleType);
@@ -128,12 +180,14 @@ public static class ExtensionManager
         }
     }
 
-    static ScriptResolver.GMLFunctionType MakeStubFunction(string functionName) =>
-        (object?[] args) => {
+    internal static ScriptResolver.GMLFunctionType MakeStubFunction(string functionName) =>
+        (object?[] args) =>
+        {
             var alwaysLog = ScriptResolver.AlwaysLogStubs;
             var logged = ScriptResolver.LoggedStubs;
-            
-            if (alwaysLog || !logged.Contains(functionName)) {
+
+            if (alwaysLog || !logged.Contains(functionName))
+            {
                 if (!alwaysLog)
                 {
                     logged.Add(functionName);
@@ -141,16 +195,16 @@ public static class ExtensionManager
 
                 DebugLog.LogWarning($"Extension function {functionName} stubbed out.");
             }
-            
+
             return null;
         };
-    
+
     static ScriptResolver.GMLFunctionType ConvertExtensionFunc(Delegate dele, List<Type> types) =>
-        (object?[] args) => 
+        (object?[] args) =>
         {
             var pins = new GCHandle?[args.Length];
             var newArgs = new List<object?>();
-            try 
+            try
             {
                 for (var i = 0; i < types.Count - 1; i++)
                 {
@@ -229,7 +283,7 @@ public static class ExtensionManager
 
         // find PE header (PE\0\0)
         stream.Seek(peAddrInt, SeekOrigin.Begin);
-        
+
         var peHeader = new byte[4];
         stream.ReadExactly(peHeader);
         if (!Enumerable.SequenceEqual(peHeader, (byte[])[0x50, 0x45, 0x00, 0x00]))

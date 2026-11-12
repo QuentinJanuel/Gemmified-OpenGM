@@ -101,8 +101,8 @@ public class RuntimeTrackInstance : GMLObject
 
     public int sequenceID
     {
-	    get => SelfVariables["sequenceID"].Conv<int>();
-	    set => SelfVariables["sequenceID"] = value.Conv<int>();
+        get => SelfVariables["sequenceID"].Conv<int>();
+        set => SelfVariables["sequenceID"] = value.Conv<int>();
     }
 
     public CLayerSequenceElement sequenceElement = null!;

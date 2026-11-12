@@ -45,16 +45,16 @@ public static partial class VMExecutor
 
         if (instruction.TypeTwo == VMType.s && instruction.TypeOne != VMType.s)
         {
-	        if (instruction.TypeOne == VMType.v)
-	        {
-		        if (valTwo is not string)
-		        {
-			        DebugLog.LogWarning($"Trying to add s ({valOne}) to non-string v ({valTwo})");
+            if (instruction.TypeOne == VMType.v)
+            {
+                if (valTwo is not string)
+                {
+                    DebugLog.LogWarning($"Trying to add s ({valOne}) to non-string v ({valTwo})");
                 }
             }
-	        else
-	        {
-		        DebugLog.LogWarning($"Trying to add s ({valOne}) to {instruction.TypeOne} ({valTwo})");
+            else
+            {
+                DebugLog.LogWarning($"Trying to add s ({valOne}) to {instruction.TypeOne} ({valTwo})");
             }
         }
 
@@ -193,7 +193,7 @@ public static partial class VMExecutor
         Call.Stack.Push(intOne << intTwo, retType);
         return (ExecutionResult.Success, null);
     }
-    
+
     public static (ExecutionResult, object?) SHR(VMCodeInstruction instruction)
     {
         var retType = GetMathReturnType(instruction);

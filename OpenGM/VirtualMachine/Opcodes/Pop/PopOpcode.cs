@@ -6,13 +6,19 @@ namespace OpenGM.VirtualMachine;
 
 public static partial class VMExecutor
 {
+    // Storing a value into a variable is how a second lasting reference to a pre-2.3 GML array comes
+    // into existence, which is what makes the array copy-on-write from then on (see GMLArray). Every
+    // whole-value store goes through one of the PopTo* methods below, so that's where it's flagged.
+
     public static void PopToGlobal(string varName, object? value)
     {
+        GMLArray.MarkShared(value);
         VariableResolver.GlobalVariables[varName] = value;
     }
 
     public static void PopToLocal(string varName, object? value)
     {
+        GMLArray.MarkShared(value);
         //Ctx.Locals[varName] = value;
         Call.Locals[varName] = value;
     }
@@ -37,6 +43,8 @@ public static partial class VMExecutor
 
     public static void PopToSelf(IStackContextSelf self, string varName, object? value)
     {
+        GMLArray.MarkShared(value);
+
         // check built in variables beforehand
         if (VariableResolver.BuiltInVariables.ContainsKey(varName))
         {
@@ -56,6 +64,27 @@ public static partial class VMExecutor
 
     public static void PopToSelfArray(IStackContextSelf self, string varName, int index, object? value)
     {
+        // The write-side twin of the argumentN case in PushSelfArrayIndex, and worse: argumentN's
+        // registered setter is `(val, _) => PopToArgument(0, val)`, which discards the index too --
+        // so `argument0[2] = v` handed to the built-in table doesn't write element 2, it replaces
+        // the whole of argument 0 with v. Index into its value instead, growing it like any other
+        // array (ArraySet), and write the result back as that argument.
+        if (TryGetArgumentIndex(varName, out var argIndex))
+        {
+            var arguments = (object?[])Call.Locals["arguments"].Conv<IList>();
+            if (argIndex >= arguments.Length)
+            {
+                return; // no such argument was passed; nothing to index into
+            }
+
+            VariableResolver.ArraySet(
+                index,
+                value,
+                () => arguments[argIndex],
+                array => arguments[argIndex] = array);
+            return;
+        }
+
         if (VariableResolver.BuiltInVariables.TryGetValue(varName, out var gs))
         {
             if (gs.setter == null)
@@ -85,6 +114,48 @@ public static partial class VMExecutor
                 value,
                 () => self.SelfVariables.GetValueOrDefault(varName),
                 array => self.SelfVariables[varName] = array);
+        }
+    }
+
+    /// <summary>
+    /// The array-subscripted twin of <see cref="PopToIndex"/>: <c>obj.arr[i] = v</c> where the
+    /// owner is an object index, not an instance id.
+    ///
+    /// Assigning through an object index writes to EVERY instance of that object, and the array
+    /// subscript changes nothing about that -- GameMaker resolves the owner first and applies the
+    /// store to each instance it names (OpenGMK's <c>Instruction::SetVariable</c> hands the same
+    /// <c>array_index</c> to <c>set_instance_var</c> once per instance of <c>Target::Objects</c>).
+    /// The plain-variable path here has always done that; the array path instead picked the
+    /// lowest-id instance and wrote only to it, so the two disagreed about the same statement
+    /// depending only on whether it had a subscript.
+    ///
+    /// I Wanna Spook Jam's headless-horseman phase is the visible case: its controller arms all
+    /// eight orbiting pumpkins to fire with <c>objPolarBossHHPumpkin.alarm[0] = 1</c>, and each
+    /// pumpkin's alarm spawns a cherry and re-arms itself. Writing to one instance left one pumpkin
+    /// firing instead of eight, an eighth of the intended bullet density.
+    /// </summary>
+    public static void PopToIndexArray(int assetId, string varName, int index, object? value)
+    {
+        if (assetId < GMConstants.FIRST_INSTANCE_ID)
+        {
+            // Asset index -- every instance of the object (FindByAssetId also walks child objects,
+            // and resolves the negative all/other/noone selectors).
+            foreach (var instance in InstanceManager.FindByAssetId(assetId))
+            {
+                PopToSelfArray(instance, varName, index, value);
+            }
+        }
+        else
+        {
+            var instance = InstanceManager.FindByInstanceId(assetId);
+
+            if (instance == null)
+            {
+                DebugLog.LogError($"Instance {assetId} couldn't be found!");
+                return;
+            }
+
+            PopToSelfArray(instance, varName, index, value);
         }
     }
 
@@ -122,13 +193,15 @@ public static partial class VMExecutor
 
     public static void PopToArgument(int index, object? value)
     {
+        GMLArray.MarkShared(value);
+
         var args = (object?[])Call.Locals["arguments"].Conv<IList>();
 
         if (index >= args.Length) // could change ExecuteCode to make args a list, but its fine
         {
             Array.Resize(ref args, index + 1);
         }
-        
+
         args[index] = value;
         Call.Locals["arguments"] = args;
     }
@@ -163,7 +236,10 @@ public static partial class VMExecutor
 
             gettersetter.setter(value, index);
         }
-        else if (VariableResolver.BuiltInSelfVariables.TryGetValue(varName, out var selfgettersetter))
+        // Same `is GamemakerObject` guard as PushBuiltin: an instance builtin only means anything on
+        // an instance, and a struct member is free to share the name.
+        else if (VariableResolver.BuiltInSelfVariables.TryGetValue(varName, out var selfgettersetter)
+                 && Self.Self is GamemakerObject)
         {
             if (selfgettersetter.getter == null || selfgettersetter.setter == null)
             {
@@ -186,6 +262,8 @@ public static partial class VMExecutor
 
     public static void PopToStatic(string varName, object? value)
     {
+        GMLArray.MarkShared(value);
+
         var currentFunc = Call.Function;
 
         if (currentFunc == null)
@@ -239,7 +317,17 @@ public static partial class VMExecutor
             }
             else if (variableType == VariableType.Self)
             {
-                if (GlobalInit)
+                // A global init script runs with no instance, and GM's own "self" there is the
+                // global scope -- so a bare `x = 5` at that level really is global.x = 5, which is
+                // what this redirect is for.
+                //
+                // It must be conditional on there being no self, though, NOT on the global-init
+                // phase alone: that phase also runs every struct literal and constructor a global
+                // script builds, and those DO have a self -- the object being constructed. Sending
+                // their field writes to globals left every such struct empty. tijit engine 2 builds
+                // its settings struct and all its input binds this way, so `gameSetting("volumeX")`
+                // answered undefined for the whole run and its init died dividing by it.
+                if (GlobalInit && Self.Self is null)
                 {
                     PopToGlobal(variableName, dataPopped);
                     return (ExecutionResult.Success, null);
@@ -317,7 +405,14 @@ public static partial class VMExecutor
                     value = Call.Stack.Pop(instruction.TypeTwo);
                 }
 
-                if (variableType == VariableType.Self)
+                // Older (pre-GMS2) bytecode doesn't always tag array-style variable references with
+                // a precise owner context at conversion time (see GameConverter.cs's variable-type
+                // parsing) -- it comes through as a literal "undefined" context, decoded as
+                // VariableType.None, for variables that ARE genuinely self/global/local/builtin/
+                // instance-owned; the actual owner is still correctly resolved at runtime via the
+                // popped instanceId/context value below (same stack shape either way), so None just
+                // needs to be handled exactly like Self rather than as its own separate case.
+                if (variableType == VariableType.Self || variableType == VariableType.None)
                 {
                     if (context is GMLObject obj)
                     {
@@ -349,20 +444,8 @@ public static partial class VMExecutor
                         }
                         else
                         {
-                            if (instanceId < GMConstants.FIRST_INSTANCE_ID)
-                            {
-                                // asset id
-                                var gm = InstanceManager.FindByAssetId(instanceId).MinBy(x => x.instanceId)!;
-                                PopToSelfArray(gm, variableName, index, value);
-                                return (ExecutionResult.Success, null);
-                            }
-                            else
-                            {
-                                // instance id
-                                var gm = InstanceManager.FindByInstanceId(instanceId)!;
-                                PopToSelfArray(gm, variableName, index, value);
-                                return (ExecutionResult.Success, null);
-                            }
+                            PopToIndexArray(instanceId, variableName, index, value);
+                            return (ExecutionResult.Success, null);
                         }
                     }
                 }
@@ -397,6 +480,16 @@ public static partial class VMExecutor
                             return (ExecutionResult.Success, null);
                         }
                     }
+                }
+                else if (variableType == VariableType.BuiltIn)
+                {
+                    // Array-style built-ins with no owning instance (view_xview[0], view_hview[0],
+                    // etc), same shape as the Global/Local cases above -- just never routed anywhere
+                    // before. (Older bytecode that tags these as VariableType.None instead is caught
+                    // by the broadened Self/None branch above, since PopToSelfArray already checks
+                    // BuiltInVariables first regardless of which instance context it's given.)
+                    PopToBuiltInArray(variableName, index, value);
+                    return (ExecutionResult.Success, null);
                 }
 
                 return (ExecutionResult.Failed, $"Don't know how to execute {instruction.Raw} (index={index}, context={context}, value={value})");
@@ -450,7 +543,11 @@ public static partial class VMExecutor
             }
 
             // TODO: do we even need to check variabletype?
-            if (variableType == VariableType.Self)
+            // Same pre-GMS2 "undefined owner context" quirk as the Array-prefix case above
+            // (GameConverter.cs's variable-type parsing decodes an untagged "undefined" context as
+            // VariableType.None) -- the owner is still correctly resolved at runtime via the popped
+            // id below, so None just needs to be treated exactly like Self here too.
+            if (variableType == VariableType.Self || variableType == VariableType.None)
             {
                 if (id == GMConstants.global)
                 {

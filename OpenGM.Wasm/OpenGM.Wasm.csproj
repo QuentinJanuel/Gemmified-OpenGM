@@ -1,0 +1,111 @@
+<Project Sdk="Microsoft.NET.Sdk.WebAssembly">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Compile-time switch guarding the window/GL/audio-specific tail in the shared Entry.cs
+         and MiscFunctions.cs (see the "#if !BROWSER" blocks added there); everything else in
+         OpenGM's source is shared, unmodified, and compiled as-is for this target too. -->
+    <DefineConstants>BROWSER</DefineConstants>
+    <NoWarn>CA1416</NoWarn>
+    <WasmMainJSPath>wwwroot/main.js</WasmMainJSPath>
+    <!-- The frame is CPU-bound in managed code, NOT in GL/JSImport crossings: a profiler run on
+         jtool showed ~33ms/frame in Draw.Views+Draw.GUI but only ~1.2ms of that in actual
+         GL.DrawCall/GL.CullCheck. The other ~25ms is the GML VM (VMExecutor) interpreting each
+         instance's Draw/DrawGUI events plus building draw jobs. Without AOT that runs under the
+         .NET IL interpreter, i.e. the wasm-hosted dotnet interpreter running the C# that itself
+         implements the GML bytecode interpreter (an interpreter atop an interpreter).
+         RunAOTCompilation precompiles the managed code to wasm so the VM loop runs as real machine
+         code; SIMD lets the AOT compiler vectorize the math-heavy vertex/matrix paths. Only affects
+         `dotnet publish` (not `build`), which is what actually produces browser-servable output
+         anyway, at the cost of a substantially slower publish and larger .wasm payload. Requires
+         the wasm-tools workload (installed). -->
+    <RunAOTCompilation>true</RunAOTCompilation>
+    <WasmEnableSIMD>true</WasmEnableSIMD>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Same OpenGM source tree, minus the pieces that need real audio/video/desktop-GL-window
+         native backends with no wasm equivalent. Everything else, including the VM interpreter,
+         asset loading, instance/room management, and built-in GML functions, compiles unchanged. -->
+    <!-- AudioManager.cs and SoundFunctions.cs reference OpenTK.Audio.OpenAL (real native OpenAL
+         bindings) purely by name; OpenTKShim/AL.cs defines a matching-named replacement backed
+         by Web Audio (wwwroot/webaudio.js), the same "compile the real file unchanged against a
+         same-named stand-in" trick already used for GL.*/GLFW.* (see OpenTKShim/GL.cs and
+         Windowing.cs), so both compile and run for real here now, no longer stubbed. -->
+    <!-- part_type_shape's built-in particle textures. Declared here as well as in OpenGM.csproj
+         because this project compiles OpenGM's sources rather than referencing its assembly, so an
+         embedded resource of OpenGM's isn't inherited. Without this line ParticleShapes finds
+         nothing at runtime and particles go invisible in the browser only. -->
+    <EmbeddedResource Include="../OpenGM/Particles/particles.dat" LogicalName="OpenGM.Particles.particles.dat" />
+    <Compile Include="../OpenGM/**/*.cs" Exclude="../OpenGM/obj/**/*.cs;../OpenGM/bin/**/*.cs;../OpenGM/VirtualMachine/BuiltInFunctions/YoYoVideoFunctions.cs" />
+    <!-- ScriptResolver.InitGMLFunctions() finds every GML built-in via reflection
+         (Assembly.GetExecutingAssembly().GetTypes()/GetMethods() plus a [GMLFunction] attribute
+         check) rather than direct calls, so the trimmer can't prove any of them are reachable and
+         removes nearly all of them. Rooting just this assembly (rather than PublishTrimmed=false,
+         which also keeps UndertaleModLib's heavy, wasm-hostile transitive deps like Magick.NET/
+         SharpZipLib/Roslyn fully alive and executing their native-platform-detecting static
+         initializers) preserves every built-in while leaving those other assemblies trimmed as
+         before. -->
+    <TrimmerRootAssembly Include="OpenGM.Wasm" />
+    <!-- UndertaleModLib's own object-counting pre-pass (UndertaleReader.FillUnserializeCountDictionaries)
+         discovers every model type's static UnserializeChildObjectCount method purely via
+         Assembly.GetTypes()/GetMethod() reflection, the same pattern OpenGM.Wasm is rooted for
+         above, and the same problem: nothing calls these methods by name, so the trimmer can't
+         prove they're reachable and removes them. Without this root, in-browser
+         UndertaleModLib parsing (WasmEntry.LoadGameFromDataWin) fails with "doesn't contain a
+         method for UndertaleModLib.Models.UndertaleGeneralInfo" during GEN8 counting, which leaves
+         CODE's reader.BytecodeAddresses unpopulated and crashes later with a NullReferenceException
+         during CODE chunk parsing.
+
+         Rooting UndertaleModLib is more invasive than OpenGM.Wasm's own root: unlike GameConverter
+         (compiled directly into OpenGM.Wasm and already reachable), this also keeps whatever
+         UndertaleModLib's own conversion code calls into its heavier transitive deps (Magick.NET,
+         SharpZipLib, Roslyn scripting), the exact concern PublishTrimmed=false was rejected for.
+         GMImage.ConvertToPng() (used by GameConverter.ExportPages for embedded texture pages) was
+         the one of those calls actually on this path, and Magick.NET's static init did turn out to
+         be wasm-hostile: "Wasm is an unsupported architecture, only X64, Arm64 and X86 are
+         supported", which killed every game whose texture pages aren't already PNG (tijit engine
+         2's are BZ2+QOI). That is fixed in ExportPages itself (it now writes GameMaker QOI,
+         decoded by UndertaleModLib's own pure-managed QoiConverter), not here: SharpZipLib's BZ2
+         and that converter are both fine under wasm, so nothing left on this path reaches
+         Magick.NET. -->
+    <TrimmerRootAssembly Include="UndertaleModLib" />
+    <!-- MemoryPackFormatterProvider's static constructor registers built-in formatters for a wide
+         range of BCL collection types (List/Dictionary/HashSet/LinkedList/etc.) by touching them
+         generically; when this assembly is itself member-trimmed, the linker can decide some of
+         those referenced BCL collection types (e.g. LinkedList`1, not used anywhere else in
+         OpenGM) are unreachable and strips them from the linked corelib entirely, which then
+         throws a TypeLoadException the first time the formatter provider's cctor runs. Rooting
+         this assembly keeps its formatter registrations, and therefore the BCL types they
+         depend on, fully intact. -->
+    <TrimmerRootAssembly Include="MemoryPack.Core" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MemoryPack" Version="1.21.4" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+    <PackageReference Include="NLayer" Version="2.0.1" />
+    <!-- Deliberately NOT the "OpenTK" meta-package: it transitively pulls in OpenTK.Graphics and
+         OpenTK.Windowing.Desktop/GraphicsLibraryFramework, whose GL.*/GLFW.* members are real
+         P/Invoke bindings to native libraries with no wasm equivalent (would DllNotFoundException
+         the moment any such call actually runs). OpenTKShim/GL.cs and OpenTKShim/Windowing.cs
+         define matching-named replacement types in the same namespaces instead; only the
+         pure-managed math/core packages are referenced for real. -->
+    <PackageReference Include="OpenTK.Mathematics" Version="4.9.4" />
+    <PackageReference Include="OpenTK.Core" Version="4.9.4" />
+    <PackageReference Include="StbImageSharp" Version="2.30.15" />
+    <!-- Both pure-managed (no native P/Invoke), same as StbImageSharp above; decode WAV/OGG sound
+         assets into PCM float data exactly like the native build does, which then gets handed to
+         AL.BufferData (OpenTKShim/AL.cs) to build a real Web Audio AudioBuffer. -->
+    <PackageReference Include="NAudio" Version="2.3.0" />
+    <PackageReference Include="StbVorbisSharp" Version="1.22.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\UndertaleModTool\UndertaleModLib\UndertaleModLib.csproj" />
+  </ItemGroup>
+
+</Project>

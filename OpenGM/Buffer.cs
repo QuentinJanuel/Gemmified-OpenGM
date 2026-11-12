@@ -2,6 +2,7 @@
 using System.Runtime.InteropServices;
 
 namespace OpenGM;
+
 public class Buffer
 {
     public byte[] Data { get; private set; }
@@ -236,7 +237,7 @@ public class Buffer
         }
 
         var dataToHash = Data.Skip(offset).Take(size).ToArray();
-        var md5 = System.Security.Cryptography.MD5.HashData(dataToHash);
+        var md5 = MD5Managed.HashData(dataToHash);
         return Convert.ToHexString(md5);
     }
 }

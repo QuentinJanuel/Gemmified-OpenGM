@@ -1,9 +1,11 @@
 ﻿using OpenGM.IO;
 using OpenGM.Loading;
+using OpenGM.Particles;
 using OpenGM.Rendering;
 using OpenGM.Sequences;
 using OpenGM.SerializedFiles;
 using OpenGM.VirtualMachine;
+using OpenGM.VirtualMachine.BuiltInFunctions;
 using OpenTK.Mathematics;
 using UndertaleModLib.Models;
 using EventType = OpenGM.VirtualMachine.EventType;
@@ -24,22 +26,62 @@ public static class RoomManager
     public static bool RoomLoaded = false;
     public static bool FirstRoom = false;
 
-    public static void EndGame() // this doesnt clear all the lists, but thats okay. we're closing the game or starting a new one, which clears stuff
+    private static void DestroyAllInstances() // this doesnt clear all the lists, but thats okay. we're closing the game or starting a new one, which clears stuff
     {
         foreach (var (instanceId, instance) in InstanceManager.instances)
         {
             instance.Destroy();
         }
 
-        InstanceManager.instances.Clear();
+        InstanceManager.ClearAllInstances();
+    }
 
+    public static void EndGame()
+    {
+        DestroyAllInstances();
         CustomWindow.Instance.Close();
     }
 
+    /// <summary>
+    /// game_restart: put the engine back the way it is at startup, short of re-reading the assets.
+    ///
+    /// This used to be three lines that jumped to a room, resetting none of the state that
+    /// <see cref="Entry"/> clears on the way in -- so a restart carried the previous run's audio,
+    /// globals, data structures, particle systems and persistent rooms into the new game. The one
+    /// that shows is audio: the old room's music keeps playing underneath the new one's, because
+    /// nothing stopped the sources and the game's own "what's playing" globals have been reset out
+    /// from under it.
+    /// </summary>
     public static void StartGame()
     {
+        AudioManager.StopAllAudio();
+
+        VMExecutor.EnvStack.Clear();
+        VMExecutor.CallStack.Clear();
+
+        DrawManager._drawObjects.Clear();
+        DataStructuresFunctions.Clear();
+        ParticleManager.Reset();
+        PersistentRooms.Clear();
+        VariableResolver.GlobalVariables.Clear();
+
+        // Same ordering constraint as startup (see Entry): extension Init scripts seed globals the
+        // first room's Create events read, so they have to run after the wipe rather than before it.
+        ExtensionManager.Init();
+
+        VMExecutor.GlobalInit = true;
+        foreach (var item in ScriptResolver.GlobalInit)
+        {
+            VMExecutor.ExecuteCode(item, null);
+        }
+        VMExecutor.GlobalInit = false;
+
+        InstanceManager.NextInstanceID = GameLoader.GeneralInfo.LastObjectID + 1;
+
         FirstRoom = true;
-        New_Room = 0;
+        // The first room in the room *order*, which isn't necessarily asset 0 -- a game whose room
+        // order had been rearranged would restart into the wrong room.
+        New_Room = GameLoader.GeneralInfo.RoomOrder[0];
         ChangeToWaitingRoom();
     }
 
@@ -50,7 +92,15 @@ public static class RoomManager
         var instancesToSave = new List<GamemakerObject>();
 
         // events could destroy other objects, cant modify during iteration
-        var instanceList = new List<GamemakerObject>(InstanceManager.instances.Values);
+        //
+        // Deactivated instances (instance_deactivate_object/_all) sit in inactiveInstances, not
+        // instances -- without including them here they'd be silently dropped: not saved (so they
+        // never come back when the room reloads), not destroyed (no RoomEnd/CleanUp), just orphaned
+        // in inactiveInstances forever. Same class of bug ChangeToWaitingRoom's non-persistent path
+        // had for the exact same reason.
+        var instanceList = new List<GamemakerObject>(InstanceManager.instances.Values)
+            .Concat(InstanceManager.inactiveInstances.Values)
+            .ToList();
         foreach (var instance in instanceList)
         {
             if (instance == null)
@@ -123,10 +173,38 @@ public static class RoomManager
         foreach (var instance in value.Instances)
         {
             DebugLog.Log($"{instance.instanceId} - {instance.Definition.Name} Active:{instance.Active} Marked:{instance.Marked} Destroyed:{instance.Destroyed}");
-            InstanceManager.instances.Add(instance.instanceId, instance);
+
+            // Route into the same dictionary the instance was saved out of -- SavePersistentRoom now
+            // saves deactivated instances too (see there), and restoring one straight into `instances`
+            // regardless of its own Active flag would both misreport it as active and set up the exact
+            // same instanceId leak/collision this whole area was fixed for if it's deactivated again.
+            if (instance.Active)
+            {
+                InstanceManager.instances.Add(instance.instanceId, instance);
+            }
+            else
+            {
+                InstanceManager.inactiveInstances.Add(instance.instanceId, instance);
+            }
+
             InstanceManager.ObjectMap[instance.Definition.AssetId].Instances.Add(instance);
+
+            // Bypasses the solid property's setter (its value isn't changing, just this instance's
+            // registration state), so SolidInstances -- which SavePersistentRoom's ClearInstances
+            // call correctly removed this instance from on the way out -- needs restoring directly.
+            if (instance.solid)
+            {
+                InstanceManager.SolidInstances.Add(instance);
+            }
+
             GamemakerObject.ExecuteEvent(instance, instance.Definition, EventType.Other, (int)EventSubtypeOther.RoomStart);
-            DrawManager.Register(instance);
+
+            // Deactivated instances don't draw (DeactivateInstance's Unregister() call already pulled
+            // them out of DrawManager on the way out) -- only re-register the ones coming back active.
+            if (instance.Active)
+            {
+                DrawManager.Register(instance);
+            }
         }
 
         foreach (var tile in CurrentRoom.Tiles)
@@ -182,7 +260,7 @@ public static class RoomManager
         }
         else if (New_Room == GMConstants.ROOM_RESTARTGAME)
         {
-            EndGame();
+            DestroyAllInstances();
             StartGame();
             return;
         }
@@ -194,6 +272,19 @@ public static class RoomManager
         var room = RoomList[New_Room];
         New_Room = -1;
 
+        // Real GameMaker applies each room's own declared speed fresh on every room load (see
+        // OpenGMK's game.rs load_room: `self.room.speed = room.speed`) -- GM8/GMS1 games have no
+        // single global project fps the way GMS2 does, so this must happen here rather than once
+        // at startup (see Room.cs's Speed field for why the old GeneralInfo.FPS source was wrong).
+        //
+        // A GMS2 room declares no speed at all and reports 0, and the project-wide FPS from GEN8 is
+        // the real answer for those. Taking the 0 literally set the frame rate to zero, which does
+        // not run slowly -- it never advances at all: the frame accumulator asks for 1/speed
+        // seconds' worth of time before stepping. tijit engine 2 (GMS 2024) loaded, ran its first
+        // room's Create and Room Start events, and then sat there forever on a black screen with
+        // nothing in the log, because its own room_goto out of the init room needs a step to happen.
+        Entry.SetGameSpeed(room.Speed > 0 ? room.Speed : (int)GameLoader.GeneralInfo.FPS);
+
         DebugLog.LogInfo($"Changing to {room!.Name}");
 
         if (CurrentRoom != null && CurrentRoom.Persistent)
@@ -204,8 +295,16 @@ public static class RoomManager
         {
             // remove everything that isn't persistent
 
+            // Deactivated instances (instance_deactivate_object/_all) sit in inactiveInstances, not
+            // instances -- they still need RoomEnd/CleanUp/destruction here same as active ones, or
+            // they leak past the room change: room-placed instances keep a fixed baked instanceId
+            // across every (re)load of that room (e.g. via room_restart), so a leaked entry collides
+            // the next time a freshly-loaded instance with that same id gets deactivated.
+
             // events could destroy other objects, cant modify during iteration
-            var instanceList = new List<GamemakerObject>(InstanceManager.instances.Values);
+            var instanceList = new List<GamemakerObject>(InstanceManager.instances.Values)
+                .Concat(InstanceManager.inactiveInstances.Values)
+                .ToList();
 
             foreach (var instance in instanceList)
             {
@@ -218,7 +317,9 @@ public static class RoomManager
             }
 
             // TODO : if RoomEnd event creates objects, should they be destroyed??
-            instanceList = new List<GamemakerObject>(InstanceManager.instances.Values);
+            instanceList = new List<GamemakerObject>(InstanceManager.instances.Values)
+                .Concat(InstanceManager.inactiveInstances.Values)
+                .ToList();
 
             foreach (var instance in instanceList)
             {
@@ -321,7 +422,7 @@ public static class RoomManager
         void RunObjEvents(GamemakerObject obj, GameObject go)
         {
             GamemakerObject.ExecuteEvent(obj, obj.Definition, EventType.PreCreate);
-            
+
             var preCreateCode = GetCodeFromCodeIndex(go.PreCreateCodeID);
             if (preCreateCode != null)
             {
@@ -340,6 +441,25 @@ public static class RoomManager
 
         foreach (var obj in CurrentRoom.RoomAsset.GameObjects)
         {
+            // "Load all instances in new room, unless they already exist due to persistence"
+            // (OpenGMK's load_room, verbatim). A room's instances carry baked ids from the room
+            // file and get them again on every (re)load, so a PERSISTENT instance placed in this
+            // room and carried back into it would otherwise be recreated on top of the copy that's
+            // still alive -- two instances, one id.
+            //
+            // Note this is only ever true for a persistent instance returning to its OWN room:
+            // entering a DIFFERENT room that also places one creates that room's own copy, with its
+            // own id, which is what lets the usual singleton guard
+            // (`if (instance_number(x) > 1) instance_destroy()`) fire. Spook Jam's oZebMistController
+            // is placed in 8 of the Zeb rooms and is persistent, so walking back into roomZeb1 hit
+            // this: id 125108 collided, InstanceManager.AddInstance refused the registration, and
+            // the half-registered instance was left running its Step event out of DrawManager's list
+            // forever, scrolling the mist background in rooms that shouldn't have it.
+            if (InstanceManager.InstanceIdInUse(obj.InstanceID))
+            {
+                continue;
+            }
+
             var definition = InstanceManager.ObjectDefinitions[obj.DefinitionID];
             var newGM = new GamemakerObject(definition, obj.X, obj.Y, definition.depth, obj.InstanceID, definition.sprite, definition.visible, definition.persistent, definition.textureMaskId);
 
@@ -368,7 +488,15 @@ public static class RoomManager
                 {
                     var item = (element as GameObject)!;
 
-                    var obj = createdObjects.First(x => x.go.InstanceID == item.InstanceID);
+                    // FirstOrDefault, not First: an instance skipped above (a persistent one already
+                    // alive with this id) has nothing to put on the layer, and it already has its
+                    // depth from the last time it was created.
+                    var obj = createdObjects.FirstOrDefault(x => x.go.InstanceID == item.InstanceID);
+                    if (obj.gm == null)
+                    {
+                        continue;
+                    }
+
                     obj.gm.depth = layer.LayerDepth;
                     layerContainer.ElementsToDraw.Add(obj.gm);
                 }
@@ -457,6 +585,48 @@ public static class RoomManager
             CurrentRoom.Layers.Add(layerContainer.ID, layerContainer);
         }
 
+        // Must run before any object's Create event (below) -- games can read background_*[i] as
+        // early as their very first Create event (e.g. jtool's own oWorld_Create_0), and this used
+        // to run after object creation entirely, so CurrentRoom.OldBackgrounds was still completely
+        // empty (padding included) the first time any such read happened, crashing regardless of
+        // the padding fix below.
+        foreach (var item in CurrentRoom.RoomAsset.OldBackgrounds)
+        {
+            var oldBackground = new GMOldBackground()
+            {
+                Enabled = item.Enabled,
+                Foreground = item.Foreground,
+                Definition = item.Definition,
+                Position = item.Position,
+                TilingX = item.TilingX,
+                TilingY = item.TilingY,
+                Speed = item.Speed,
+                Stretch = item.Stretch
+            };
+
+            CurrentRoom.OldBackgrounds.Add(oldBackground);
+        }
+
+        // Real GM8 rooms always have exactly 8 legacy background slots internally (background_*[0..7]
+        // are safely readable/writable regardless of how many a room's editor actually configured --
+        // unused slots just read back as disabled/empty), not just however many the room asset
+        // happened to define. Padding here avoids an IndexOutOfRangeException the first time GML
+        // code touches a background_*[i] slot the room editor never explicitly set up.
+        while (CurrentRoom.OldBackgrounds.Count < 8)
+        {
+            CurrentRoom.OldBackgrounds.Add(new GMOldBackground
+            {
+                Enabled = false,
+                Foreground = false,
+                Definition = -1,
+                Position = default,
+                TilingX = false,
+                TilingY = false,
+                Speed = default,
+                Stretch = false
+            });
+        }
+
         // instance_exists will still return true for all objects even in Create of the first object.... ugh
         DebugLog.LogInfo($"Calling PreCreate/Create/CC...");
         foreach (var item in createdObjects)
@@ -486,23 +656,6 @@ public static class RoomManager
             };
 
             CurrentRoom.Tiles.Add(newTile);
-        }
-
-        foreach (var item in CurrentRoom.RoomAsset.OldBackgrounds)
-        {
-            var oldBackground = new GMOldBackground()
-            {
-                Enabled = item.Enabled,
-                Foreground = item.Foreground,
-                Definition = item.Definition,
-                Position = item.Position,
-                TilingX = item.TilingX,
-                TilingY = item.TilingY,
-                Speed = item.Speed,
-                Stretch = item.Stretch
-            };
-
-            CurrentRoom.OldBackgrounds.Add(oldBackground);
         }
 
         var currentInstances = InstanceManager.instances.Values.ToList();
@@ -568,7 +721,7 @@ public static class RoomManager
 
             return GameLoader.Codes[codeIndex];
         }
-        
+
         GC.Collect(); // gc on load boundary
 
         DebugLog.LogInfo($"- Finished room change.");

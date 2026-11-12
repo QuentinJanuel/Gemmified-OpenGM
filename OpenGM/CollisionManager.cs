@@ -34,7 +34,7 @@ public static class CollisionManager
 {
     static double CompatFloor(double num) => CompatFlags.LegacyCollision ? Math.Floor(num) : num;
     static double CompatRound(double num) => CompatFlags.LegacyCollision ? Math.Round(num) : num;
-    
+
     public static BBox CalculateBoundingBox(GamemakerObject gm)
     {
         gm.bbox_dirty = false;
@@ -58,10 +58,10 @@ public static class CollisionManager
 
         var origin = SpriteManager.GetSpriteOrigin(index);
 
-        var left = CompatRound(pos.X + (gm.margins.X * gm.image_xscale) - (origin.X * gm.image_xscale));
-        var top = CompatRound(pos.Y + (gm.margins.W * gm.image_yscale) - (origin.Y * gm.image_yscale));
-        var right = CompatRound(pos.X + ((gm.margins.Y + 1) * gm.image_xscale) - (origin.X * gm.image_xscale) + offset);
-        var bottom = CompatRound(pos.Y + ((gm.margins.Z + 1) * gm.image_yscale) - (origin.Y * gm.image_yscale) + offset);
+        var left = pos.X + (gm.margins.X * gm.image_xscale) - (origin.X * gm.image_xscale);
+        var top = pos.Y + (gm.margins.W * gm.image_yscale) - (origin.Y * gm.image_yscale);
+        var right = pos.X + ((gm.margins.Y + 1) * gm.image_xscale) - (origin.X * gm.image_xscale) + offset;
+        var bottom = pos.Y + ((gm.margins.Z + 1) * gm.image_yscale) - (origin.Y * gm.image_yscale) + offset;
 
         if (gm.image_xscale < 0)
         {
@@ -78,10 +78,10 @@ public static class CollisionManager
         {
             return new BBox()
             {
-                left = left,
-                top = top,
-                right = right,
-                bottom = bottom
+                left = CompatRound(left),
+                top = CompatRound(top),
+                right = CompatRound(right),
+                bottom = CompatRound(bottom)
             };
         }
 
@@ -97,12 +97,21 @@ public static class CollisionManager
         bottomRight = bottomRight.RotateAroundPoint(pos, gm.image_angle);
         bottomLeft = bottomLeft.RotateAroundPoint(pos, gm.image_angle);
 
+        // Rounded exactly like the unrotated case above -- real GameMaker's bounding box is whole
+        // pixels however the instance is turned (OpenGMK's update_bbox rounds each of the four
+        // rotated min/max values), and the rotation can't land on them exactly: a quarter turn goes
+        // through sin/cos, so an edge that should be 416 comes back as 415.99999991. Left unrounded,
+        // that reads as a box a hair up and to the left of where it belongs -- and since legacy
+        // collision treats right/bottom as inclusive and compares with a +1, a hair costs a whole
+        // pixel. Continuity's df_rCoop1 stands its 16x32 coopBreakable blocks on their side with
+        // image_angle 270 so they're 32x16, flush with the floor's own top: the player walking along
+        // that floor jammed against the breakable one pixel early, with no way through but a jump.
         return new BBox
         {
-            left = CustomMath.Min(topLeft.X, topRight.X, bottomRight.X, bottomLeft.X),
-            right = CustomMath.Max(topLeft.X, topRight.X, bottomRight.X, bottomLeft.X),
-            top = CustomMath.Min(topLeft.Y, topRight.Y, bottomRight.Y, bottomLeft.Y),
-            bottom = CustomMath.Max(topLeft.Y, topRight.Y, bottomRight.Y, bottomLeft.Y)
+            left = CompatRound(CustomMath.Min(topLeft.X, topRight.X, bottomRight.X, bottomLeft.X)),
+            right = CompatRound(CustomMath.Max(topLeft.X, topRight.X, bottomRight.X, bottomLeft.X)),
+            top = CompatRound(CustomMath.Min(topLeft.Y, topRight.Y, bottomRight.Y, bottomLeft.Y)),
+            bottom = CompatRound(CustomMath.Max(topLeft.Y, topRight.Y, bottomRight.Y, bottomLeft.Y))
         };
     }
 
@@ -212,7 +221,11 @@ public static class CollisionManager
         }
         else if (obj == GMConstants.other)
         {
-            throw new NotImplementedException("Other");
+            var otherInstance = VMExecutor.Other.GMSelf;
+            if (IsValid(otherInstance))
+            {
+                return otherInstance.instanceId;
+            }
         }
         else if (obj < GMConstants.FIRST_INSTANCE_ID)
         {
@@ -239,6 +252,84 @@ public static class CollisionManager
         return GMConstants.noone;
     }
 
+    /// <summary>
+    /// Backs place_free/place_empty: moves self to (x, y), checks collision against every instance
+    /// flagged solid (place_free) or every instance at all (place_empty), then restores self's
+    /// position. Uses the same Collision_Instance self-vs-self exclusion as Command_InstancePlace
+    /// (place_meeting's own backing function), so self is never counted as blocking itself.
+    /// </summary>
+    public static bool Command_PlaceFree(GamemakerObject self, double x, double y, bool solidOnly)
+    {
+        var prevX = self.x;
+        var prevY = self.y;
+        self.x = x;
+        self.y = y;
+
+        var blocked = IsCollidingAtCurrentPosition(self, solidOnly);
+
+        self.x = prevX;
+        self.y = prevY;
+
+        return !blocked;
+    }
+
+    /// <summary>
+    /// Whether self is colliding, right now, at its current (already-set) x/y -- unlike
+    /// Command_PlaceFree, this never moves self itself. Backs move_outside_solid/move_outside_all
+    /// and move_bounce_solid/move_bounce_all, which need to test/mutate self's real position
+    /// directly as part of a multi-step algorithm rather than a single hypothetical query.
+    /// </summary>
+    public static bool IsCollidingAtCurrentPosition(GamemakerObject self, bool solidOnly)
+    {
+        // solidOnly is the overwhelmingly common case (move_contact_solid/move_bounce_solid/
+        // move_outside_solid, and place_free) -- iterate the maintained solid-only set instead of
+        // every instance in the room, since the non-solid majority (a death effect's particles,
+        // etc.) would otherwise all get walked and skipped on every single call. Correctness is
+        // identical either way; solidOnly is already implied for anything in this set.
+        var candidates = solidOnly ? (IEnumerable<GamemakerObject>)InstanceManager.SolidInstances : InstanceManager.instances.Values;
+
+        foreach (var instance in candidates)
+        {
+            if (instance.Marked || !instance.Active)
+            {
+                continue;
+            }
+
+            if (Collision_Instance(self, instance, true))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The same "is this a real, live, colliding instance" check Command_InstancePlace applies to
+    /// every candidate it considers -- pulled out so DrawManager.UpdateCollisions's spatial-grid
+    /// broad-phase can apply the exact same precise test to its own (pre-pruned) candidate list,
+    /// without duplicating the logic.
+    /// </summary>
+    public static bool IsValidCollisionCandidate(GamemakerObject self, GamemakerObject? instance)
+    {
+        if (instance == null)
+        {
+            return false;
+        }
+
+        if (instance.Marked)
+        {
+            return false;
+        }
+
+        if (!instance.Active)
+        {
+            return false;
+        }
+
+        return Collision_Instance(self, instance, true);
+    }
+
     public static int Command_InstancePlace(GamemakerObject self, double x, double y, int obj, List<GamemakerObject>? list = null)
     {
         var prevX = self.x;
@@ -246,33 +337,13 @@ public static class CollisionManager
         self.x = x;
         self.y = y;
 
-        bool IsValid(GamemakerObject? instance)
-        {
-            if (instance == null)
-            {
-                return false;
-            }
-
-            if (instance.Marked)
-            {
-                return false;
-            }
-
-            if (!instance.Active)
-            {
-                return false;
-            }
-
-            return Collision_Instance(self, instance, true);
-        }
-
         var returnValue = GMConstants.noone;
 
         if (obj == GMConstants.all)
         {
             foreach (var instance in InstanceManager.instances.Values)
             {
-                if (IsValid(instance))
+                if (IsValidCollisionCandidate(self, instance))
                 {
                     list?.Add(instance);
                     returnValue = instance.instanceId;
@@ -284,7 +355,7 @@ public static class CollisionManager
             var instances = InstanceManager.FindByAssetId(obj);
             foreach (var instance in instances)
             {
-                if (IsValid(instance))
+                if (IsValidCollisionCandidate(self, instance))
                 {
                     list?.Add(instance);
                     returnValue = instance.instanceId;
@@ -296,7 +367,7 @@ public static class CollisionManager
             // instance id
             var instance = InstanceManager.FindByInstanceId(obj);
 
-            if (IsValid(instance))
+            if (IsValidCollisionCandidate(self, instance))
             {
                 list?.Add(instance!);
                 returnValue = instance!.instanceId;
@@ -305,7 +376,7 @@ public static class CollisionManager
 
         self.x = prevX;
         self.y = prevY;
-        
+
         return returnValue;
     }
 
@@ -539,7 +610,7 @@ public static class CollisionManager
             || y >= self.bbox_bottom + addition
             || y < self.bbox_top) // TODO : there's 2 instflags checks here too
         {
-            return false; 
+            return false;
         }
 
         var index = self.mask_index;
@@ -584,7 +655,7 @@ public static class CollisionManager
 
         if (other.bbox_dirty)
         {
-            other.bbox = CalculateBoundingBox(self);
+            other.bbox = CalculateBoundingBox(other);
         }
 
         var addition = CompatFlags.LegacyCollision ? 1f : 0f;
@@ -597,7 +668,7 @@ public static class CollisionManager
             // Bounding boxes don't even intersect.
             return false;
         }
-         
+
         var index = self.mask_index;
         if (index < 0)
         {
@@ -633,11 +704,16 @@ public static class CollisionManager
         {
             if (CompatFlags.LegacyCollision)
             {
+                // GM8's real precise-collision (OpenGMK's check_collision, game.rs) rounds x/y to
+                // whole pixels before sampling either mask -- x/y are otherwise near-always
+                // fractional (accumulated gravity/speed), so skipping this round shifts the sampled
+                // mask row/column by a sub-pixel amount versus the real engine, silently missing
+                // exactly-touching boundary pixels.
                 return OrigPreciseCollision(
-                    selfSprite, CustomMath.FloorToInt(self.image_index), self.bbox, self.x, self.y, self.image_xscale, self.image_yscale, self.image_angle,
-                    otherSprite, CustomMath.FloorToInt(other.image_index), other.bbox, other.x, other.y, other.image_xscale, other.image_yscale, other.image_angle);
+                    selfSprite, CustomMath.FloorToInt(self.image_index), self.bbox, Math.Round(self.x), Math.Round(self.y), self.image_xscale, self.image_yscale, self.image_angle,
+                    otherSprite, CustomMath.FloorToInt(other.image_index), other.bbox, Math.Round(other.x), Math.Round(other.y), other.image_xscale, other.image_yscale, other.image_angle);
             }
-            
+
             return PreciseCollision(
                 selfSprite, CustomMath.FloorToInt(self.image_index), self.bbox, self.x, self.y, self.image_xscale, self.image_yscale, self.image_angle,
                 otherSprite, CustomMath.FloorToInt(other.image_index), other.bbox, other.x, other.y, other.image_xscale, other.image_yscale, other.image_angle);
@@ -746,9 +822,7 @@ public static class CollisionManager
 
         if (precise && spriteData.SepMasks == UndertaleSprite.SepMaskType.Precise)
         {
-            //throw new NotImplementedException("precise collision line");
-            DebugLog.LogError("Precise collision_line not implemented!");
-            return true;
+            return PreciseCollisionLine(spriteData, CustomMath.FloorToInt(self.image_index), self.x, self.y, self.image_xscale, self.image_yscale, self.image_angle, x1, y1, x2, y2);
         }
 
         return true;
@@ -958,20 +1032,8 @@ public static class CollisionManager
         if (sprite2.Textures.Count <= 0)
             return false;
 
-        if (sprite1.CollisionMasks.Count > 0)
-            _img1 = _img1 % sprite1.CollisionMasks.Count;
-        if (_img1 < 0)
-        {
-            _img1 = _img1 + sprite1.CollisionMasks.Count;
-        }
-
-        if (sprite2.CollisionMasks.Count > 0)
-            _img2 = _img2 % sprite2.CollisionMasks.Count;
-
-        if (_img2 < 0)
-        {
-            _img2 = _img2 + sprite2.CollisionMasks.Count;
-        }
+        _img1 = MaskIndexFor(sprite1, _img1);
+        _img2 = MaskIndexFor(sprite2, _img2);
 
         _scale1x = 1.0 / _scale1x;
         _scale1y = 1.0 / _scale1y;
@@ -983,15 +1045,19 @@ public static class CollisionManager
         var t = CustomMath.Max(_bb1.top, _bb2.top);
         var b = CustomMath.Min(_bb1.bottom, _bb2.bottom);
 
-        if ((_scale1x == 1) && (_scale2x == 1) && (_scale1y == 1) && (_scale2y == 1) && (_angle1 == 0) && (_angle2 == 0)) 
+        if ((_scale1x == 1) && (_scale2x == 1) && (_scale1y == 1) && (_scale2y == 1) && (_angle1 == 0) && (_angle2 == 0))
         {
-            for (var i = l; i <= r; i++) {
-                for (var j = t; j <= b; j++) {
+            for (var i = l; i <= r; i++)
+            {
+                for (var j = t; j <= b; j++)
+                {
                     var xx = CustomMath.FloorToInt(i - _x1 + sprite1.OriginX);
                     var yy = CustomMath.FloorToInt(j - _y1 + sprite1.OriginY);
-                    
-                    if ((xx < 0) || (xx >= sprite1.Width)) continue;
-                    if ((yy < 0) || (yy >= sprite1.Height)) continue;
+
+                    if ((xx < 0) || (xx >= sprite1.Width))
+                        continue;
+                    if ((yy < 0) || (yy >= sprite1.Height))
+                        continue;
 
                     if (!ColMaskSet(sprite1, xx, yy, sprite1.CollisionMasks[_img1]))
                         continue;
@@ -999,63 +1065,77 @@ public static class CollisionManager
                     xx = CustomMath.FloorToInt(i - _x2 + sprite2.OriginX);
                     yy = CustomMath.FloorToInt(j - _y2 + sprite2.OriginY);
 
-                    if ((xx < 0) || (xx >= sprite2.Width)) continue;
-                    if ((yy < 0) || (yy >= sprite2.Height)) continue;
+                    if ((xx < 0) || (xx >= sprite2.Width))
+                        continue;
+                    if ((yy < 0) || (yy >= sprite2.Height))
+                        continue;
 
                     if (!ColMaskSet(sprite2, xx, yy, sprite2.CollisionMasks[_img2]))
                         continue;
-                        
+
                     return true;
                 }
             }
         }
-        else if ((_angle1 == 0) && (_angle2 == 0)) 
+        else if ((_angle1 == 0) && (_angle2 == 0))
         {
-            for (var i = l; i <= r; i++) {
-                for (var j = t; j <= b; j++) {
+            for (var i = l; i <= r; i++)
+            {
+                for (var j = t; j <= b; j++)
+                {
                     var xx = CustomMath.FloorToInt(((i - _x1) * _scale1x + sprite1.OriginX));
                     var yy = CustomMath.FloorToInt(((j - _y1) * _scale1y + sprite1.OriginY));
-                    if ((xx < 0) || (xx >= sprite1.Width)) continue;
-                    if ((yy < 0) || (yy >= sprite1.Height)) continue;
+                    if ((xx < 0) || (xx >= sprite1.Width))
+                        continue;
+                    if ((yy < 0) || (yy >= sprite1.Height))
+                        continue;
 
-                    if(!ColMaskSet(sprite1, xx,  yy,sprite1.CollisionMasks[_img1]))
-                            continue;
+                    if (!ColMaskSet(sprite1, xx, yy, sprite1.CollisionMasks[_img1]))
+                        continue;
 
                     xx = CustomMath.FloorToInt(((i - _x2) * _scale2x + sprite2.OriginX));
                     yy = CustomMath.FloorToInt(((j - _y2) * _scale2y + sprite2.OriginY));
-                    if ((xx < 0) || (xx >= sprite2.Width)) continue;
-                    if ((yy < 0) || (yy >= sprite2.Height)) continue;
+                    if ((xx < 0) || (xx >= sprite2.Width))
+                        continue;
+                    if ((yy < 0) || (yy >= sprite2.Height))
+                        continue;
 
-                    if (!ColMaskSet(sprite2, xx,  yy,sprite2.CollisionMasks[_img2]))
+                    if (!ColMaskSet(sprite2, xx, yy, sprite2.CollisionMasks[_img2]))
                         continue;
 
                     return true;
                 }
             }
         }
-        else 
+        else
         {
             var ss1 = Math.Sin(-_angle1 * Math.PI / 180);
             var cc1 = Math.Cos(-_angle1 * Math.PI / 180);
             var ss2 = Math.Sin(-_angle2 * Math.PI / 180);
             var cc2 = Math.Cos(-_angle2 * Math.PI / 180);
 
-            for (var i = l; i <= r; i++) {
-                for (var j = t; j <= b; j++) {
+            for (var i = l; i <= r; i++)
+            {
+                for (var j = t; j <= b; j++)
+                {
                     var xx = CustomMath.FloorToInt(((cc1 * (i - _x1) + ss1 * (j - _y1)) * _scale1x + sprite1.OriginX));
                     var yy = CustomMath.FloorToInt(((cc1 * (j - _y1) - ss1 * (i - _x1)) * _scale1y + sprite1.OriginY));
-                    if ((xx < 0) || (xx >= sprite1.Width)) continue;
-                    if ((yy < 0) || (yy >= sprite1.Height)) continue;
+                    if ((xx < 0) || (xx >= sprite1.Width))
+                        continue;
+                    if ((yy < 0) || (yy >= sprite1.Height))
+                        continue;
 
-                    if (!ColMaskSet(sprite1, xx,  yy,sprite1.CollisionMasks[_img1]))
+                    if (!ColMaskSet(sprite1, xx, yy, sprite1.CollisionMasks[_img1]))
                         continue;
 
                     xx = CustomMath.FloorToInt(((cc2 * (i - _x2) + ss2 * (j - _y2)) * _scale2x + sprite2.OriginX));
                     yy = CustomMath.FloorToInt(((cc2 * (j - _y2) - ss2 * (i - _x2)) * _scale2y + sprite2.OriginY));
-                    if ((xx < 0) || (xx >= sprite2.Width)) continue;
-                    if ((yy < 0) || (yy >= sprite2.Height)) continue;
+                    if ((xx < 0) || (xx >= sprite2.Width))
+                        continue;
+                    if ((yy < 0) || (yy >= sprite2.Height))
+                        continue;
 
-                    if (!ColMaskSet(sprite2, xx,  yy,sprite2.CollisionMasks[_img2]))
+                    if (!ColMaskSet(sprite2, xx, yy, sprite2.CollisionMasks[_img2]))
                         continue;
 
                     return true;
@@ -1064,6 +1144,38 @@ public static class CollisionManager
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Maps a raw image_index onto a collision mask slot, mirroring how SpriteManager maps it onto a
+    /// subimage, so an instance always collides with the frame it is drawing.
+    ///
+    /// Every mask lookup has to go through this. image_index is not guaranteed to be a valid slot:
+    /// GamemakerObject.Animate defers the frame wrap by a step (so game code can test for the frame
+    /// past the last one), which means image_index legitimately sits at the mask count -- and, when
+    /// image_speed is negative, at -1 -- for one step at a time. PreciseCollisionLine was the one
+    /// mask lookup with no normalisation at all, and indexed straight out of range the moment a
+    /// precise-collision sprite's animation reached its end. That's an IndexOutOfRangeException per
+    /// call, and collision_line runs in a Step event, so it fired every frame.
+    /// </summary>
+    public static int MaskIndexFor(SpriteData sprite, int imageIndex)
+    {
+        var count = sprite.CollisionMasks.Count;
+
+        if (count <= 0)
+        {
+            return 0;
+        }
+
+        // Resting one past the end still shows (and so collides with) the last frame. Modulo would
+        // send it back to the first, which would disagree with what's on screen.
+        if (imageIndex == count)
+        {
+            return count - 1;
+        }
+
+        imageIndex %= count;
+        return imageIndex < 0 ? imageIndex + count : imageIndex;
     }
 
     public static bool PreciseCollision(
@@ -1182,8 +1294,8 @@ public static class CollisionManager
                             continue;
 
                         //if (sprite1.maskcreated)
-                            if (!ColMaskSet(sprite1, u1i, CustomMath.FloorToInt(v1), sprite1.CollisionMasks[_img1]))
-                                continue;
+                        if (!ColMaskSet(sprite1, u1i, CustomMath.FloorToInt(v1), sprite1.CollisionMasks[_img1]))
+                            continue;
                     }
 
                     if (sprite2.SepMasks == UndertaleSprite.SepMaskType.Precise)
@@ -1195,8 +1307,8 @@ public static class CollisionManager
                             continue;
                         //if (sprite2.maskcreated)
                         //{
-                            if (!ColMaskSet(sprite2, u2i, CustomMath.FloorToInt(v2), sprite2.CollisionMasks[_img2]))
-                                continue;
+                        if (!ColMaskSet(sprite2, u2i, CustomMath.FloorToInt(v2), sprite2.CollisionMasks[_img2]))
+                            continue;
                         //}
                     }
 
@@ -1263,8 +1375,8 @@ public static class CollisionManager
                     {
                         //if (sprite1.maskcreated)
                         //{
-                            if (!ColMaskSet(sprite1, CustomMath.FloorToInt(u1), CustomMath.FloorToInt(v1), sprite1.CollisionMasks[_img1]))
-                                continue;
+                        if (!ColMaskSet(sprite1, CustomMath.FloorToInt(u1), CustomMath.FloorToInt(v1), sprite1.CollisionMasks[_img1]))
+                            continue;
                         //}
                     }
 
@@ -1286,8 +1398,8 @@ public static class CollisionManager
                     {
                         //if (sprite2.maskcreated)
                         //{
-                            if (!ColMaskSet(sprite2, CustomMath.FloorToInt(u2), CustomMath.FloorToInt(v2), sprite2.CollisionMasks[_img2]))
-                                continue;
+                        if (!ColMaskSet(sprite2, CustomMath.FloorToInt(u2), CustomMath.FloorToInt(v2), sprite2.CollisionMasks[_img2]))
+                            continue;
                         //}
                     }
                     return true;
@@ -1300,16 +1412,12 @@ public static class CollisionManager
 
     public static bool PreciseCollisionPoint(SpriteData sprite, int imageIndex, double x, double y, double xscale, double yscale, double angle, double _x, double _y)
     {
-        if (sprite.Textures.Count == 0)
+        if (sprite.Textures.Count == 0 || sprite.CollisionMasks.Count == 0)
         {
             return false;
         }
 
-        imageIndex %= sprite.CollisionMasks.Count;
-        if (imageIndex < 0)
-        {
-            imageIndex += sprite.CollisionMasks.Count;
-        }
+        imageIndex = MaskIndexFor(sprite, imageIndex);
 
         x -= 0.5;
         y -= 0.5;
@@ -1333,13 +1441,73 @@ public static class CollisionManager
         return ColMaskSet(sprite, xx, yy, sprite.CollisionMasks[imageIndex]);
     }
 
+    /// <summary>
+    /// Ported from OpenGMK's check_collision_line (game.rs): steps one pixel at a time along
+    /// whichever axis of the (already bbox-clipped) line segment has the larger span -- a
+    /// near-vertical line samples every row, a near-horizontal one every column -- interpolating
+    /// the other axis, and tests each sampled point against the sprite's real pixel mask via
+    /// PreciseCollisionPoint instead of just the bounding box the caller already checked.
+    /// </summary>
+    public static bool PreciseCollisionLine(SpriteData sprite, int imageIndex, double x, double y, double xscale, double yscale, double angle, double x1, double y1, double x2, double y2)
+    {
+        // Real GM rounds the (already-clipped) line endpoints to whole pixels before walking them.
+        var rx1 = (int)Math.Round(x1, MidpointRounding.AwayFromZero);
+        var ry1 = (int)Math.Round(y1, MidpointRounding.AwayFromZero);
+        var rx2 = (int)Math.Round(x2, MidpointRounding.AwayFromZero);
+        var ry2 = (int)Math.Round(y2, MidpointRounding.AwayFromZero);
+
+        // The horizontal-walk branch below assumes x1 <= x2 (Collision_Line's caller already
+        // guarantees this before reaching the precise branch, but this function shouldn't rely on
+        // an undocumented precondition from just one of its call sites).
+        if (rx2 < rx1)
+        {
+            (rx1, rx2) = (rx2, rx1);
+            (ry1, ry2) = (ry2, ry1);
+        }
+
+        var iterVertical = Math.Abs(rx2 - rx1) < Math.Abs(ry2 - ry1);
+
+        if (iterVertical && ry2 < ry1)
+        {
+            (rx1, rx2) = (rx2, rx1);
+            (ry1, ry2) = (ry2, ry1);
+        }
+
+        var pointCount = (iterVertical ? ry2 - ry1 : rx2 - rx1) + 1;
+
+        for (var i = 0; i < pointCount; i++)
+        {
+            double px, py;
+            if (pointCount == 1)
+            {
+                px = rx1;
+                py = ry1;
+            }
+            else if (iterVertical)
+            {
+                var slope = (double)(rx2 - rx1) / (ry2 - ry1);
+                px = rx1 + (i * slope);
+                py = ry1 + i;
+            }
+            else
+            {
+                var slope = (double)(ry2 - ry1) / (rx2 - rx1);
+                px = rx1 + i;
+                py = ry1 + (i * slope);
+            }
+
+            if (PreciseCollisionPoint(sprite, imageIndex, x, y, xscale, yscale, angle, px, py))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public static bool PreciseCollisionRectangle(SpriteData sprite, int imageIndex, BBox bbox, double x, double y, double xscale, double yscale, double angle, BBox rr)
     {
-        imageIndex %= sprite.CollisionMasks.Count;
-        if (imageIndex < 0)
-        {
-            imageIndex += sprite.CollisionMasks.Count;
-        }
+        imageIndex = MaskIndexFor(sprite, imageIndex);
 
         var l = CustomMath.Max(bbox.left, rr.left);
         var r = CustomMath.Min(bbox.right, rr.right);
@@ -1398,11 +1566,7 @@ public static class CollisionManager
             return false;
         }
 
-        _img1 %= sprite.CollisionMasks.Count;
-        if (_img1 < 0)
-        {
-            _img1 += sprite.CollisionMasks.Count;
-        }
+        _img1 = MaskIndexFor(sprite, _img1);
 
         // Compute overlapping bounding box
         var l = CustomMath.Max(_bb1.left, _rr.left);
@@ -1460,7 +1624,7 @@ public static class CollisionManager
                 var tmp = (i - mx) * ww;
                 var sq1 = tmp * tmp;//Sqr((i - mx) * ww);
 
-                for (var j = t; j <= b; j++)    
+                for (var j = t; j <= b; j++)
                 {
                     var jmy = (j - my) * hh;
                     if ((sq1 + (jmy * jmy)) > 1)
@@ -1500,6 +1664,26 @@ public static class CollisionManager
         //var bwidth = sprite.MarginRight - sprite.MarginLeft + 1;
         var bwidth = sprite.Width;
         var mwidth = (bwidth + 7) >> 3;
+
+        // A pixel outside the mask isn't set, so it isn't a collision. Both bounds have to be
+        // checked, on both axes:
+        //
+        // - Negative u or v indexed the byte array negatively and threw IndexOutOfRangeException.
+        //   Callers hand this genuinely out-of-range points: collision_line samples along a segment
+        //   that's been clipped to the bounding box and then *rounded* to whole pixels, and for a
+        //   rotated instance PreciseCollisionPoint runs those samples back through a rotation, so
+        //   landing a pixel or two outside is routine. I Wanna Spook Jam's obj_128MatterclawHand hit
+        //   it every frame -- its collision_line lives in a Step event, and the throw took the rest
+        //   of the event with it.
+        // - u past the right-hand edge stayed silent but read the *wrong pixel*: u is a bit offset
+        //   within a row, so u == bwidth lands on byte (v * mwidth) + 1, which for a narrow sprite
+        //   is the next row along rather than anything out of bounds. The old check only compared
+        //   the final byte offset against the array length, which that passes.
+        if (u < 0 || u >= bwidth || v < 0 || v >= sprite.Height)
+        {
+            return false;
+        }
+
         var ouroff = u >> 3;
 
         if (v * mwidth + ouroff >= pMaskBase.Length)
@@ -1576,7 +1760,7 @@ public static class CollisionManager
     public static Vector2d[] getPoints(GamemakerObject self)
     {
         var spriteIndex = (self.mask_index >= 0)
-            ? self.mask_index 
+            ? self.mask_index
             : self.sprite_index;
         var spriteData = SpriteManager.GetSpriteAsset(spriteIndex);
 
@@ -1778,11 +1962,11 @@ public static class CollisionManager
         var min = newProj;
         var max = newProj;
 
-        for (var i = 1; i< 2; ++i)
+        for (var i = 1; i < 2; ++i)
         {
             newProj = points[i].X * axis.X + axis.Y * points[i].Y;
 
-            if (newProj<min)
+            if (newProj < min)
                 min = newProj;
             else if (newProj > max)
                 max = newProj;

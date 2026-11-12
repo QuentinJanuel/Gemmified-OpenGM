@@ -6,6 +6,7 @@ using OpenTK.Mathematics;
 using OpenTK.Windowing.Common;
 using OpenTK.Windowing.Desktop;
 using OpenTK.Windowing.GraphicsLibraryFramework;
+using StbImageSharp;
 
 namespace OpenGM.VirtualMachine.BuiltInFunctions
 {
@@ -13,6 +14,31 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
     {
         public static double[] CircleCos = new double[65];
         public static double[] CircleSin = new double[65];
+
+        /// <summary>
+        /// Primes the tables above, which every circle and ellipse reads to place its rim vertices.
+        ///
+        /// They start all-zero, and a zero sin/cos puts every rim vertex exactly on the centre: the
+        /// fan has no area, so nothing rasterises and the shape is simply absent -- no error, no
+        /// GL complaint, just a draw call that covers no pixels. Only <see cref="Entry.Main"/>
+        /// filled them (draw_set_circle_precision(24)), which is the desktop entry point; the
+        /// browser one (OpenGM.Wasm's WasmEntry) never runs it, so under wasm draw_circle,
+        /// draw_ellipse and their _color/_colour variants -- everything that goes through
+        /// DrawEllipseFan or DrawEllipseColor -- silently drew nothing at all.
+        ///
+        /// That is invisible until a game leans on one. I wanna reach the Moon's caves build their
+        /// darkness as a light-grey full-screen rectangle on a surface, subtract-blended over the
+        /// room, with each light punched back out of it by a white-to-black draw_ellipse_color --
+        /// the rectangle landed and the ellipses did not, so the whole area rendered as an evenly
+        /// dimmed near-black screen that was otherwise perfectly playable.
+        ///
+        /// A static constructor rather than another entry-point call: it runs before any member of
+        /// this class can be touched, so a third entry point cannot forget it.
+        /// </summary>
+        static GraphicFunctions()
+        {
+            draw_set_circle_precision(24);
+        }
 
         // not in 2022.500, no idea where in the list it goes
         [GMLFunction("window_enable_borderless_fullscreen", GMLFunctionFlags.Stub)]
@@ -41,7 +67,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             {
                 return DrawManager.GuiSize.Value.X;
             }
-            
+
             return window_get_width(args);
         }
 
@@ -52,16 +78,16 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             {
                 return DrawManager.GuiSize.Value.Y;
             }
-            
+
             return window_get_height(args);
         }
-    
+
         [GMLFunction("display_get_dpi_x", GMLFunctionFlags.Stub)]
         public static object display_get_dpi_x(object?[] args)
         {
             return 1;
         }
-    
+
         [GMLFunction("display_get_dpi_y", GMLFunctionFlags.Stub)]
         public static object display_get_dpi_y(object?[] args)
         {
@@ -70,7 +96,20 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
 
         // display_get_frequency
         // display_get_orientation
-        // diplay_reset
+
+        [GMLFunction("display_reset", GMLFunctionFlags.Stub)]
+        public static object? display_reset(object?[] args)
+        {
+            // aa_level, vsync -- no-op: the canvas has no real vsync toggle to flip (rendering is
+            // always driven by requestAnimationFrame, which is inherently vsynced to the display)
+            // and AA level isn't something this call controls post-context-creation. Real GM also
+            // uses this to reset the window's position/size to the display default, which
+            // YoYoYo_Engine's own scrSetVsync relies on (immediately overwriting it via an alarm
+            // that restores window_set_position/window_set_size from window_get_x/y/width/height
+            // saved just before this call) -- there's no window to reposition in a browser tab, so
+            // that part is a no-op too, same as window_set_position/window_set_size elsewhere.
+            return null;
+        }
 
         [GMLFunction("display_mouse_get_x", GMLFunctionFlags.Stub)]
         public static object? display_mouse_get_x(object?[] args)
@@ -140,15 +179,22 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         public static object? window_set_fullscreen(object?[] args)
         {
             var full = args[0].Conv<bool>();
+#if BROWSER
+            BrowserWindow.SetFullscreen(full);
+#else
             CustomWindow.Instance.WindowState = full ? WindowState.Fullscreen : WindowState.Normal;
-            // BUG: this fucks resolution
+#endif
             return null;
         }
 
         [GMLFunction("window_get_fullscreen")]
         public static object window_get_fullscreen(object?[] args)
         {
+#if BROWSER
+            return BrowserWindow.GetFullscreen();
+#else
             return CustomWindow.Instance.IsFullscreen;
+#endif
         }
 
         [GMLFunction("window_set_showborder")]
@@ -216,7 +262,6 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         public static object? window_set_caption(object?[] args)
         {
             var caption = args[0].Conv<string>();
-            DebugLog.LogInfo($"window_set_caption : {caption}");
             CustomWindow.Instance.Title = caption;
             return null;
         }
@@ -258,16 +303,16 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         // window_set_min_height
         // window_set_max_height
 
-         [GMLFunction("window_set_position")]
-         public static object? window_set_position(object?[] args)
-         {
-             var x = args[0].Conv<int>();
-             var y = args[1].Conv<int>();
+        [GMLFunction("window_set_position")]
+        public static object? window_set_position(object?[] args)
+        {
+            var x = args[0].Conv<int>();
+            var y = args[1].Conv<int>();
 
-             CustomWindow.Instance.ClientLocation = new Vector2i(x, y);
+            CustomWindow.Instance.ClientLocation = new Vector2i(x, y);
 
-             return null;
-         }
+            return null;
+        }
 
         [GMLFunction("window_set_size")]
         public static object? window_set_size(object?[] args)
@@ -313,7 +358,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
 
         [GMLFunction("window_get_y")]
         public static object? window_get_y(object?[] args)
-        { 
+        {
             return CustomWindow.Instance.ClientLocation.Y;
         }
 
@@ -344,7 +389,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
 
         [GMLFunction("window_mouse_get_y")]
         public static object? window_mouse_get_y(object?[] args)
-        { 
+        {
             return InputHandler.MousePos.Y;
         }
 
@@ -361,7 +406,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
 
         [GMLFunction("window_views_mouse_get_y")]
         public static object? window_views_mouse_get_y(object?[] args)
-        { 
+        {
             var mouseY = InputHandler.MousePos.Y;
             var windowHeight = window_get_height([]).Conv<int>();
             var viewY = RoomManager.CurrentRoom.Views[0].ViewY;
@@ -405,6 +450,16 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         {
             return SpriteManager.DrawAlpha;
         }
+
+        [GMLFunction("draw_set_blend_mode")]
+        public static object? draw_set_blend_mode(object?[] args) => _3DFunctions.gpu_set_blendmode(args);
+
+        [GMLFunction("draw_set_blend_mode_ext")]
+        public static object? draw_set_blend_mode_ext(object?[] args) => _3DFunctions.gpu_set_blendmode_ext(args);
+
+        [GMLFunction("draw_set_color_write_enable")]
+        [GMLFunction("draw_set_colour_write_enable")]
+        public static object? draw_set_colour_write_enable(object?[] args) => _3DFunctions.gpu_set_colourwriteenable(args);
 
         [GMLFunction("make_color_rgb")]
         [GMLFunction("make_colour_rgb")]
@@ -481,9 +536,14 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             g += m;
             b += m;
 
-            var rByte = (byte)(r * 255);
-            var gByte = (byte)(g * 255);
-            var bByte = (byte)(b * 255);
+            // Rounded, not truncated -- same rule merge_colour follows, and captured the same way:
+            // GMS 1.4.9999 answers make_color_hsv(100, 200, 255) = 0x7EFF37, where truncating the
+            // blue channel's 125.7 gives 0x7DFF37.
+            static byte Channel(double v) => (byte)Math.Clamp(Math.Round(v * 255, MidpointRounding.AwayFromZero), 0, 255);
+
+            var rByte = Channel(r);
+            var gByte = Channel(g);
+            var bByte = Channel(b);
 
             return (bByte << 16) + (gByte << 8) + rByte;
         }
@@ -620,12 +680,20 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             var mg = oneBytes[1] + (twoBytes[1] - oneBytes[1]) * amount;
             var mb = oneBytes[2] + (twoBytes[2] - oneBytes[2]) * amount;
 
-            return BitConverter.ToInt32(new[] { (byte)mr, (byte)mg, (byte)mb, (byte)0 }, 0);
+            // Round each channel rather than truncating it. Captured from GMS 1.4.9999:
+            // merge_color(c_red, c_blue, 0.5) is 0x800080, i.e. the exact half of 0..255 lands on
+            // 128. Truncating gave 127 on both channels -- a whole level darker on every blend, and
+            // biased consistently one way, which is what makes it visible across a gradient.
+            static byte Channel(double v) => (byte)Math.Clamp(Math.Round(v, MidpointRounding.AwayFromZero), 0, 255);
+
+            return BitConverter.ToInt32([Channel(mr), Channel(mg), Channel(mb), 0], 0);
         }
 
         [GMLFunction("draw_clear")]
         public static object? draw_clear(object?[] args)
         {
+            // A clear wipes whatever the queue was going to draw onto, so it has to go out first.
+            GraphicsManager.FlushPolygonBatch();
             var col = args[0].Conv<int>();
             var colour = col.ABGRToCol4(1);
             GL.ClearColor(colour);
@@ -637,6 +705,8 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         [GMLFunction("draw_clear_alpha")]
         public static object? draw_clear_alpha(object?[] args)
         {
+            // A clear wipes whatever the queue was going to draw onto, so it has to go out first.
+            GraphicsManager.FlushPolygonBatch();
             var col = args[0].Conv<int>();
             var alpha = args[1].Conv<double>();
 
@@ -732,9 +802,6 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return null;
         }
 
-        // draw_roundrect
-        // draw_roundrect_ext
-
         [GMLFunction("draw_triangle")]
         public static object? draw_triangle(object?[] args)
         {
@@ -763,6 +830,65 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return null;
         }
 
+        /// <summary>
+        /// Emits a filled/outlined ellipse fan without allocating a job or a pair of arrays per
+        /// call, and using the precomputed CircleSin/CircleCos tables rather than 2 trig calls per
+        /// vertex. Both matter here because the idiomatic GML radial gradient is ~50 concentric
+        /// draw_circle calls PER LIGHT PER FRAME (see GraphicsManager.BatchConvexPolygon).
+        ///
+        /// The tables also fix a rounding bug the old inline maths had: it stepped by an integer
+        /// `360 / precision` degrees, so any precision that doesn't divide 360 (e.g. 28) swept less
+        /// than a full turn and left the shape visibly open.
+        /// </summary>
+        /// <summary>
+        /// <paramref name="centreCol"/>/<paramref name="edgeCol"/> are -1 for "use the current draw
+        /// colour". When they differ the fan gets a centre vertex so the gradient has something to
+        /// interpolate from -- a rim-only fan would be flat.
+        /// </summary>
+        private static void DrawEllipseFan(double midX, double midY, double radiusX, double radiusY,
+            bool outline, int centreCol = -1, int edgeCol = -1)
+        {
+            var precision = DrawManager.CirclePrecision;
+            var alpha = SpriteManager.DrawAlpha;
+            var c = (centreCol < 0 ? SpriteManager.DrawColor : centreCol).ABGRToCol4(alpha);
+            var rim = (edgeCol < 0 ? SpriteManager.DrawColor : edgeCol).ABGRToCol4(alpha);
+            var depth = GraphicsManager.GR_Depth;
+
+            if (!outline && centreCol >= 0 && !c.Equals(rim))
+            {
+                Span<GraphicsManager.Vertex> gradient = stackalloc GraphicsManager.Vertex[precision + 2];
+                gradient[0] = new GraphicsManager.Vertex(new Vector3d(midX, midY, depth), c, Vector2d.Zero);
+                for (var i = 0; i < precision; i++)
+                {
+                    gradient[i + 1] = new GraphicsManager.Vertex(
+                        new Vector3d(midX + (radiusX * CircleSin[i]), midY + (radiusY * CircleCos[i]), depth),
+                        rim, Vector2d.Zero);
+                }
+                gradient[^1] = gradient[1];
+                GraphicsManager.BatchConvexPolygon(gradient);
+                return;
+            }
+
+            Span<GraphicsManager.Vertex> fan = stackalloc GraphicsManager.Vertex[precision];
+            for (var i = 0; i < precision; i++)
+            {
+                // sin on x / cos on y, keeping the vertex order the inline maths produced.
+                fan[i] = new GraphicsManager.Vertex(
+                    new Vector3d(midX + (radiusX * CircleSin[i]), midY + (radiusY * CircleCos[i]), depth),
+                    outline ? rim : c,
+                    Vector2d.Zero);
+            }
+
+            if (outline)
+            {
+                GraphicsManager.BindTexture0(GraphicsManager.DefaultTexture);
+                GraphicsManager.Draw(PrimitiveType.LineLoop, fan);
+                return;
+            }
+
+            GraphicsManager.BatchConvexPolygon(fan);
+        }
+
         [GMLFunction("draw_circle")]
         public static object? draw_circle(object?[] args)
         {
@@ -771,24 +897,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             var r = args[2].Conv<double>();
             var outline = args[3].Conv<bool>();
 
-            var angle = 360 / DrawManager.CirclePrecision;
-            var c = SpriteManager.DrawColor.ABGRToCol4(SpriteManager.DrawAlpha);
-
-            var points = new Vector3d[DrawManager.CirclePrecision];
-            var colors = new Color4[DrawManager.CirclePrecision];
-            for (var i = 0; i < DrawManager.CirclePrecision; i++)
-            {
-                points[i] = new Vector3d(x + (r * Math.Sin(angle * i * CustomMath.Deg2Rad)), y + (r * Math.Cos(angle * i * CustomMath.Deg2Rad)), GraphicsManager.GR_Depth);
-                colors[i] = c;
-            }
-
-            CustomWindow.Draw(new GMPolygonJob()
-            {
-                Colors = colors,
-                Vertices = points,
-                Outline = outline
-            });
-
+            DrawEllipseFan(x, y, r, r, outline);
             return null;
         }
 
@@ -801,33 +910,127 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             var y2 = args[3].Conv<double>();
             var outline = args[4].Conv<bool>();
 
-            var midpointX = (x1 + x2) / 2;
-            var midpointY = (y1 + y2) / 2;
+            DrawEllipseFan((x1 + x2) / 2, (y1 + y2) / 2, Math.Abs((x1 - x2) / 2), Math.Abs((y1 - y2) / 2), outline);
+            return null;
+        }
 
-            var xRadius = Math.Abs((x1 - x2) / 2);
-            var yRadius = Math.Abs((y1 - y2) / 2);
+        /// <summary>
+        /// The corner radius GameMaker uses for draw_roundrect. Measured on GMS 1.4.9999 by
+        /// rendering to a surface and reading back the first filled pixel of each row: the profile
+        /// is <c>-1,4,2,2,1,1,1,...</c> and it is <b>identical at 10x10, 40x40, 64x32 and 96x96</b>,
+        /// so the radius is a fixed number of pixels rather than a fraction of the rectangle.
+        /// (It is clamped below for rectangles smaller than the radius itself.)
+        /// </summary>
+        private const double RoundRectRadius = 4;
 
-            var angle = 360 / DrawManager.CirclePrecision;
-            var c = SpriteManager.DrawColor.ABGRToCol4(SpriteManager.DrawAlpha);
+        [GMLFunction("draw_roundrect")]
+        public static object? draw_roundrect(object?[] args)
+            => DrawRoundRect(args[0].Conv<double>(), args[1].Conv<double>(), args[2].Conv<double>(),
+                args[3].Conv<double>(), RoundRectRadius, RoundRectRadius, args[4].Conv<bool>(),
+                SpriteManager.DrawColor, SpriteManager.DrawColor);
 
-            var points = new Vector3d[DrawManager.CirclePrecision];
-            var colors = new Color4[DrawManager.CirclePrecision];
-            for (var i = 0; i < DrawManager.CirclePrecision; i++)
+        /// <summary>
+        /// The _ext variants take the corner radii per axis instead of using <see cref="RoundRectRadius"/>,
+        /// so the corners can be elliptical. Note the argument order: the radii sit between the
+        /// rectangle and the colours, and <c>outline</c> is last -- as it is for every draw_*_colour.
+        /// </summary>
+        [GMLFunction("draw_roundrect_ext")]
+        public static object? draw_roundrect_ext(object?[] args)
+            => DrawRoundRect(args[0].Conv<double>(), args[1].Conv<double>(), args[2].Conv<double>(),
+                args[3].Conv<double>(), args[4].Conv<double>(), args[5].Conv<double>(), args[6].Conv<bool>(),
+                SpriteManager.DrawColor, SpriteManager.DrawColor);
+
+        [GMLFunction("draw_roundrect_color")]
+        [GMLFunction("draw_roundrect_colour")]
+        public static object? draw_roundrect_color(object?[] args)
+            => DrawRoundRect(args[0].Conv<double>(), args[1].Conv<double>(), args[2].Conv<double>(),
+                args[3].Conv<double>(), RoundRectRadius, RoundRectRadius, args[6].Conv<bool>(),
+                args[4].Conv<int>(), args[5].Conv<int>());
+
+        [GMLFunction("draw_roundrect_color_ext")]
+        [GMLFunction("draw_roundrect_colour_ext")]
+        public static object? draw_roundrect_color_ext(object?[] args)
+            => DrawRoundRect(args[0].Conv<double>(), args[1].Conv<double>(), args[2].Conv<double>(),
+                args[3].Conv<double>(), args[4].Conv<double>(), args[5].Conv<double>(), args[8].Conv<bool>(),
+                args[6].Conv<int>(), args[7].Conv<int>());
+
+        private static object? DrawRoundRect(double x1, double y1, double x2, double y2,
+            double radiusX, double radiusY, bool outline, int col1, int col2)
+        {
+            if (x1 > x2)
+                (x1, x2) = (x2, x1);
+            if (y1 > y2)
+                (y1, y2) = (y2, y1);
+
+            // A rectangle narrower or shorter than two radii has no straight section left on that
+            // axis, so the radius collapses to half the side rather than the corners overlapping.
+            radiusX = Math.Min(radiusX, (x2 - x1) / 2);
+            radiusY = Math.Min(radiusY, (y2 - y1) / 2);
+            if (radiusX <= 0 || radiusY <= 0)
             {
-                points[i] = new Vector3d(
-                    midpointX + (xRadius * Math.Sin(angle * i * CustomMath.Deg2Rad)),
-                    midpointY + (yRadius * Math.Cos(angle * i * CustomMath.Deg2Rad)),
-                    GraphicsManager.GR_Depth);
-                colors[i] = c;
+                return draw_rectangle([x1, y1, x2, y2, outline]);
             }
 
-            CustomWindow.Draw(new GMPolygonJob()
-            {
-                Colors = colors,
-                Vertices = points,
-                Outline = outline
-            });
+            // Walk the outline as one closed loop: four quarter-circle corners joined by the
+            // straight edges between them. Built once and used for both the outline and the fill so
+            // the two can never disagree about where the shape is.
+            var points = new List<Vector2d>();
+            var precision = Math.Max(4, (int)Math.Ceiling(Math.Max(radiusX, radiusY)));
 
+            void Corner(double cx, double cy, double startDegrees)
+            {
+                for (var i = 0; i <= precision; i++)
+                {
+                    var angle = (startDegrees + (90.0 * i / precision)) * Math.PI / 180.0;
+                    points.Add(new Vector2d(cx + (Math.Cos(angle) * radiusX), cy - (Math.Sin(angle) * radiusY)));
+                }
+            }
+
+            Corner(x2 - radiusX, y2 - radiusY, 270); // bottom-right
+            Corner(x2 - radiusX, y1 + radiusY, 0);   // top-right
+            Corner(x1 + radiusX, y1 + radiusY, 90);  // top-left
+            Corner(x1 + radiusX, y2 - radiusY, 180); // bottom-left
+
+            var c1 = col1.ABGRToCol4(SpriteManager.DrawAlpha);
+            var c2 = col2.ABGRToCol4(SpriteManager.DrawAlpha);
+
+            if (outline)
+            {
+                for (var i = 0; i < points.Count; i++)
+                {
+                    var a = points[i];
+                    var b = points[(i + 1) % points.Count];
+                    CustomWindow.Draw(new GMLineJob
+                    {
+                        col1 = c1,
+                        col2 = c1,
+                        width = 1,
+                        x1 = (float)a.X,
+                        y1 = (float)a.Y,
+                        x2 = (float)b.X,
+                        y2 = (float)b.Y,
+                    });
+                }
+
+                return null;
+            }
+
+            // Filled: a fan from the centre, which is convex so it batches like draw_circle does --
+            // one draw call however many segments the corners take. col1 is the centre colour and
+            // col2 the edge, matching draw_rectangle_color's gradient.
+            var fan = new GraphicsManager.Vertex[points.Count + 2];
+            fan[0] = new GraphicsManager.Vertex(
+                new Vector3d((x1 + x2) / 2, (y1 + y2) / 2, 0), c1, Vector2d.Zero);
+            for (var i = 0; i < points.Count; i++)
+            {
+                fan[i + 1] = new GraphicsManager.Vertex(
+                    new Vector3d(points[i].X, points[i].Y, 0), c2, Vector2d.Zero);
+            }
+            // Close the fan back onto its first edge point.
+            fan[^1] = new GraphicsManager.Vertex(
+                new Vector3d(points[0].X, points[0].Y, 0), c2, Vector2d.Zero);
+
+            GraphicsManager.BatchConvexPolygon(fan);
             return null;
         }
 
@@ -925,19 +1128,15 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
 
             var fraction = amount / 100;
 
-            var barx1 = 0d;
-            var bary1 = 0d;
-            var barx2 = 0d;
-            var bary2 = 0d;
+            double barx1, bary1, barx2, bary2;
 
+            // Only 1/2/3 are recognised directions -- everything else falls back to left-to-right,
+            // matching the runner's own `switch` default (OpenGMK's kernel.rs does the same). Games
+            // do pass junk here: Spook Jam's oDB_GunSpike/objFrickWitchSpike ask for 180, reading
+            // the argument as degrees. Without the fallback those calls left the bar rect at
+            // (0,0)-(0,0), so only the backdrop drew and the bar looked permanently full.
             switch (direction)
             {
-                case 0:
-                    barx1 = x1;
-                    bary1 = y1;
-                    barx2 = x1 + fraction * (x2 - x1);
-                    bary2 = y2;
-                    break;
                 case 1:
                     barx1 = x2 - fraction * (x2 - x1);
                     bary1 = y1;
@@ -954,6 +1153,12 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
                     barx1 = x1;
                     bary1 = y2 - fraction * (y2 - y1);
                     barx2 = x2;
+                    bary2 = y2;
+                    break;
+                default:
+                    barx1 = x1;
+                    bary1 = y1;
+                    barx2 = x1 + fraction * (x2 - x1);
                     bary2 = y2;
                     break;
             }
@@ -1101,11 +1306,6 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return null;
         }
 
-        // draw_roundrect_color
-        // draw_roundrect_colour
-        // draw_roundrect_color_ext
-        // draw_roundrect_colour_ext
-
         [GMLFunction("draw_triangle_color")]
         [GMLFunction("draw_triangle_colour")]
         public static object? draw_triangle_color(object?[] args)
@@ -1177,7 +1377,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
                 {
                     points[i] = new Vector3d(
                         xm + (rx * CircleCos[i]),
-                        ym + (ry * CircleSin[i]), 
+                        ym + (ry * CircleSin[i]),
                         GraphicsManager.GR_Depth);
                     colors[i] = col2;
                 }
@@ -1260,16 +1460,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             var kind = args[0].Conv<int>();
 
             // cant just convert straight to PrimitiveType bc LineLoop isnt used grr
-            PrimType = kind switch
-            {
-                1 => PrimitiveType.Points,
-                2 => PrimitiveType.Lines,
-                3 => PrimitiveType.LineStrip,
-                4 => PrimitiveType.Triangles,
-                5 => PrimitiveType.TriangleStrip,
-                6 => PrimitiveType.TriangleFan,
-                _ => throw new ArgumentOutOfRangeException(),
-            };
+            PrimType = GraphicsManager.ToPrimitiveType(kind);
 
             /* i think on c++ you could use draw_primitive_begin multiple times, and since it only
              * sets g_NumPrims to 0, it should leave the newer vertices intact while overwritting older ones
@@ -1277,15 +1468,66 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
              */
 
             Vertices = new();
+            PrimTexture = null;
 
             return null;
         }
 
-        // draw_primitive_begin_texture
+        /// <summary>
+        /// The texture draw_vertex_texture's uv coordinates are relative to, for the primitive
+        /// currently being built -- null for an untextured one.
+        /// </summary>
+        public static SpritePageItem? PrimTexture;
+
+        [GMLFunction("draw_primitive_begin_texture")]
+        public static object? draw_primitive_begin_texture(object?[] args)
+        {
+            var kind = args[0].Conv<int>();
+
+            draw_primitive_begin([kind]); // clears PrimTexture, so set it after
+            PrimTexture = args[1] as SpritePageItem;
+
+            return null;
+        }
+
+        /// <summary>
+        /// Maps GML's 0..1-across-the-texture uv onto the atlas page the texture actually lives on:
+        /// sprites and backgrounds are packed into shared pages, so a raw (0,0)-(1,1) would sample
+        /// the whole page -- every other sprite on it included -- instead of just this one image.
+        /// </summary>
+        /// <summary>Exposed for the d3d_vertex_texture_* family, which shares this pipeline.</summary>
+        public static Vector2d PrimitiveUVPublic(double xtex, double ytex) => PrimitiveUV(xtex, ytex);
+
+        private static Vector2d PrimitiveUV(double xtex, double ytex)
+        {
+            if (PrimTexture == null || !PageManager.TexturePages.TryGetValue(PrimTexture.Page, out var page))
+            {
+                return new(xtex, ytex);
+            }
+
+            return new(
+                (PrimTexture.SourceX + (xtex * PrimTexture.SourceWidth)) / page.image.Width,
+                (PrimTexture.SourceY + (ytex * PrimTexture.SourceHeight)) / page.image.Height);
+        }
 
         [GMLFunction("draw_primitive_end")]
         public static object? draw_primitive_end(object?[] args)
         {
+            // draw_primitive_begin's primitives are untextured (draw_vertex hardcodes uv 0,0), and the
+            // fragment shader multiplies the sampled texel into the output. Without binding the 1x1 white
+            // texture the primitive samples whatever texture the previous, unrelated draw left bound -- a
+            // transparent texel there silently multiplies the whole primitive away. Every other untextured
+            // path (lines, polygons) already binds it.
+            // A draw_primitive_begin_texture primitive binds that texture's own page instead.
+            if (PrimTexture != null && PageManager.TexturePages.TryGetValue(PrimTexture.Page, out var page))
+            {
+                GraphicsManager.BindTexture0(page.id);
+            }
+            else
+            {
+                GraphicsManager.BindTexture0(GraphicsManager.DefaultTexture);
+            }
+
             GraphicsManager.Draw(PrimType, Vertices.ToArray());
             return null;
         }
@@ -1317,15 +1559,45 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return null;
         }
 
-        // draw_vertex_texture
-        // draw_vertex_texture_color
-        // draw_vertex_texture_colour
+        [GMLFunction("draw_vertex_texture")]
+        public static object? draw_vertex_texture(object?[] args)
+        {
+            var x = args[0].Conv<double>();
+            var y = args[1].Conv<double>();
+            var xtex = args[2].Conv<double>();
+            var ytex = args[3].Conv<double>();
+
+            Vertices.Add(new(new(x, y, GraphicsManager.GR_Depth),
+                SpriteManager.DrawColor.ABGRToCol4(SpriteManager.DrawAlpha),
+                PrimitiveUV(xtex, ytex)));
+            return null;
+        }
+
+        [GMLFunction("draw_vertex_texture_color")]
+        [GMLFunction("draw_vertex_texture_colour")]
+        public static object? draw_vertex_texture_colour(object?[] args)
+        {
+            var x = args[0].Conv<double>();
+            var y = args[1].Conv<double>();
+            var xtex = args[2].Conv<double>();
+            var ytex = args[3].Conv<double>();
+            var col = args[4].Conv<int>();
+            var alpha = args[5].Conv<double>();
+
+            Vertices.Add(new(new(x, y, GraphicsManager.GR_Depth),
+                col.ABGRToCol4(alpha),
+                PrimitiveUV(xtex, ytex)));
+            return null;
+        }
 
         [GMLFunction("sprite_get_uvs")]
         public static object? sprite_get_uvs(object?[] args)
         {
             var spr = args[0].Conv<int>();
-            var subimg = args[0].Conv<int>();
+            // args[1], not args[0]: reading the sprite index as the sub-image asked for frame 118 of
+            // sprite 118, and GetSpritePageItem takes that modulo the frame count rather than
+            // failing, so a multi-frame sprite quietly answered with some other frame's rect.
+            var subimg = args[1].Conv<int>();
 
             if (!SpriteManager.SpriteExists(spr))
             {
@@ -1352,6 +1624,24 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         }
 
         // font_get_uvs
+
+        [GMLFunction("font_get_size")]
+        public static object font_get_size(object?[] args)
+        {
+            var fontIndex = args[0].Conv<int>();
+            var font = TextManager.FontAssets.ElementAtOrDefault(fontIndex);
+
+            return font is null ? -1 : (double)font.Size;
+        }
+
+        [GMLFunction("font_get_name")]
+        public static object font_get_name(object?[] args)
+        {
+            var fontIndex = args[0].Conv<int>();
+            var font = TextManager.FontAssets.ElementAtOrDefault(fontIndex);
+
+            return font?.name ?? "";
+        }
 
         [GMLFunction("font_get_info")]
         public static object? font_get_info(object?[] args)
@@ -1401,14 +1691,15 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
 
             return result;
         }
-        
+
         // font_cache_glyph
 
         [GMLFunction("sprite_get_texture")]
         public static object? sprite_get_texture(object?[] args)
         {
             var spr = args[0].Conv<int>();
-            var subimg = args[0].Conv<int>();
+            // args[1], not args[0] -- same copy-paste as sprite_get_uvs had.
+            var subimg = args[1].Conv<int>();
 
             if (!SpriteManager.SpriteExists(spr))
             {
@@ -1512,12 +1803,15 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         [GMLFunction("draw_get_font")]
         public static object draw_get_font(object?[] args)
         {
-            if (TextManager.fontAsset == null)
+            // What was *chosen*, not what is drawn with: a game that has set no font is told so,
+            // exactly as GameMaker 2.3 answers -1 for its own default. TextManager.fontAsset falls
+            // back to the game's first font so that drawing works, which is a different question.
+            if (TextManager.ChosenFont == null)
             {
                 return -1;
             }
 
-            return TextManager.fontAsset.AssetIndex;
+            return TextManager.ChosenFont.AssetIndex;
         }
 
         [GMLFunction("draw_set_font")]
@@ -1579,7 +1873,12 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         [GMLFunction("string_width")]
         public static object string_width(object?[] args)
         {
-            var str = args[0].Conv<string>();
+            // Must match CustomWindow.Draw(GMTextJob)'s own pre-split conversion (pre-GMS2 games
+            // treat # as a line break in drawn text), or a string with an unconverted # renders as
+            // more actual lines than this measures, silently undercounting -- callers that use
+            // string_width/string_height to position multi-line text (draw_text(x, y - string_height(...), ...),
+            // e.g. YoYoYo_Engine's objSign) end up shifted into whatever's below the text.
+            var str = CompatFlags.ApplyHashNewlines(args[0].Conv<string>());
 
             return TextManager.StringWidth(str);
         }
@@ -1587,35 +1886,56 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         [GMLFunction("string_height")]
         public static object string_height(object?[] args)
         {
-            var str = args[0].Conv<string>();
+            var str = CompatFlags.ApplyHashNewlines(args[0].Conv<string>());
 
             if (TextManager.fontAsset == null)
             {
                 return 1;
             }
 
-            var lines = TextManager.SplitText(str, -1, TextManager.fontAsset);
-            var textHeight = TextManager.TextHeight(str);
-            if (lines == null)
-            {
-                return textHeight;
-            }
-            else
-            {
-                return textHeight * lines.Count;
-            }
+            // Must match CustomWindow.Draw(GMTextJob)'s own total-height formula
+            // ((lines.Length - 1) * lineSep + LineHeight(lastLine)) -- the two are paced by the
+            // same TextManager.FontHeight() for a default separation, and have to stay that way.
+            // A mismatch compounds per line, so a many-line sign's yOffset (draw_text(x, y -
+            // string_height(signText), ...), e.g. YoYoYo_Engine's objSign) ends up taller than the
+            // text actually rendered, pushing the whole block up past where it should sit.
+            return TextManager.StringHeight(str);
         }
 
-        [GMLFunction("string_width_ext", GMLFunctionFlags.Stub)]
+        /// <summary>
+        /// The line separation the draw_text_ext family should actually use. A negative argument
+        /// means the font's own default (see <see cref="TextManager.FontHeight"/>), which the
+        /// non-ext draw paths already applied -- these passed the raw argument straight through, so
+        /// the near-universal `sep = -1` call became a line separation of minus one pixel, stacking
+        /// every line on top of the previous one.
+        /// </summary>
+        private static float LineSeparation(int sep) => sep < 0 ? TextManager.FontHeight() : sep;
+
+        [GMLFunction("string_width_ext")]
         public static object string_width_ext(object?[] args)
         {
-            return string_width(args);
+            var str = CompatFlags.ApplyHashNewlines(args[0].Conv<string>());
+            var w = args[2].Conv<int>();
+
+            return TextManager.StringWidth(string.Join('\n', TextManager.WrapText(str, w)));
         }
 
-        [GMLFunction("string_height_ext", GMLFunctionFlags.Stub)]
+        [GMLFunction("string_height_ext")]
         public static object string_height_ext(object?[] args)
         {
-            return string_height(args);
+            var str = CompatFlags.ApplyHashNewlines(args[0].Conv<string>());
+            var sep = args[1].Conv<int>();
+            var w = args[2].Conv<int>();
+
+            if (TextManager.fontAsset == null)
+            {
+                return 1;
+            }
+
+            // Same shape as TextManager.StringHeight, but with the caller's line separation rather
+            // than the font's own -- that's the whole point of the _ext variant.
+            var lines = TextManager.WrapText(str, w);
+            return (int)(((lines.Length - 1) * LineSeparation(sep)) + TextManager.LineHeight(lines[^1]));
         }
 
         [GMLFunction("draw_text")]
@@ -1635,7 +1955,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             var y = args[1].Conv<double>();
             var str = args[2].Conv<string>();
             var sep = args[3].Conv<int>();
-            var w = args[4].Conv<double>();
+            var w = args[4].Conv<int>();
 
             var c = SpriteManager.DrawColor.ABGRToCol4(SpriteManager.DrawAlpha);
 
@@ -1646,10 +1966,11 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
                 asset = TextManager.fontAsset,
                 halign = TextManager.halign,
                 valign = TextManager.valign,
-                lineSep = sep,
+                lineSep = LineSeparation(sep),
                 text = str,
                 screenPos = new(x, y),
-                scale = Vector2d.One
+                scale = Vector2d.One,
+                wrapWidth = w
             });
 
             return null;
@@ -1675,7 +1996,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             var y = args[1].Conv<double>();
             var str = args[2].Conv<string>();
             var sep = args[3].Conv<int>();
-            var w = args[4].Conv<int>(); // TODO : implement
+            var w = args[4].Conv<int>();
             var xscale = args[5].Conv<double>();
             var yscale = args[6].Conv<double>();
             var angle = args[7].Conv<double>();
@@ -1691,8 +2012,9 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
                 halign = TextManager.halign,
                 valign = TextManager.valign,
                 scale = new(xscale, yscale),
-                lineSep = sep,
-                text = str
+                lineSep = LineSeparation(sep),
+                text = str,
+                wrapWidth = w
             });
 
             return null;
@@ -1754,65 +2076,67 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         [GMLFunction("draw_text_ext_colour")]
         public static object? draw_text_ext_color(object?[] args)
         {
-	        var x = args[0].Conv<double>();
-	        var y = args[1].Conv<double>();
-	        var str = args[2].Conv<string>();
-	        var sep = args[3].Conv<int>();
-	        var w = args[4].Conv<double>();
-	        var c1 = args[5].Conv<int>();
-	        var c2 = args[6].Conv<int>();
-	        var c3 = args[7].Conv<int>();
-	        var c4 = args[8].Conv<int>();
-	        var alpha = args[9].Conv<double>();
+            var x = args[0].Conv<double>();
+            var y = args[1].Conv<double>();
+            var str = args[2].Conv<string>();
+            var sep = args[3].Conv<int>();
+            var w = args[4].Conv<int>();
+            var c1 = args[5].Conv<int>();
+            var c2 = args[6].Conv<int>();
+            var c3 = args[7].Conv<int>();
+            var c4 = args[8].Conv<int>();
+            var alpha = args[9].Conv<double>();
 
-	        CustomWindow.Draw(new GMTextJob()
-	        {
-		        Colors = [c1.ABGRToCol4(alpha), c2.ABGRToCol4(alpha), c3.ABGRToCol4(alpha), c4.ABGRToCol4(alpha)],
-		        angle = 0,
-		        asset = TextManager.fontAsset,
-		        halign = TextManager.halign,
-		        valign = TextManager.valign,
-		        lineSep = sep,
-		        text = str,
-		        screenPos = new(x, y),
-		        scale = Vector2d.One
-	        });
+            CustomWindow.Draw(new GMTextJob()
+            {
+                Colors = [c1.ABGRToCol4(alpha), c2.ABGRToCol4(alpha), c3.ABGRToCol4(alpha), c4.ABGRToCol4(alpha)],
+                angle = 0,
+                asset = TextManager.fontAsset,
+                halign = TextManager.halign,
+                valign = TextManager.valign,
+                lineSep = LineSeparation(sep),
+                text = str,
+                screenPos = new(x, y),
+                scale = Vector2d.One,
+                wrapWidth = w
+            });
 
-	        return null;
+            return null;
         }
 
         [GMLFunction("draw_text_ext_transformed_color")]
         [GMLFunction("draw_text_ext_transformed_colour")]
         public static object? draw_text_ext_transformed_color(object?[] args)
         {
-	        var x = args[0].Conv<double>();
-	        var y = args[1].Conv<double>();
-	        var str = args[2].Conv<string>();
-	        var sep = args[3].Conv<int>();
-	        var w = args[4].Conv<int>(); // TODO : implement
-	        var xscale = args[5].Conv<double>();
-	        var yscale = args[6].Conv<double>();
-	        var angle = args[7].Conv<double>();
-	        var c1 = args[8].Conv<int>();
-	        var c2 = args[9].Conv<int>();
-	        var c3 = args[10].Conv<int>();
-	        var c4 = args[11].Conv<int>();
-	        var alpha = args[12].Conv<double>();
+            var x = args[0].Conv<double>();
+            var y = args[1].Conv<double>();
+            var str = args[2].Conv<string>();
+            var sep = args[3].Conv<int>();
+            var w = args[4].Conv<int>();
+            var xscale = args[5].Conv<double>();
+            var yscale = args[6].Conv<double>();
+            var angle = args[7].Conv<double>();
+            var c1 = args[8].Conv<int>();
+            var c2 = args[9].Conv<int>();
+            var c3 = args[10].Conv<int>();
+            var c4 = args[11].Conv<int>();
+            var alpha = args[12].Conv<double>();
 
-	        CustomWindow.Draw(new GMTextJob()
-	        {
-		        screenPos = new(x, y),
-		        asset = TextManager.fontAsset,
-		        angle = angle,
-		        Colors = [c1.ABGRToCol4(alpha), c2.ABGRToCol4(alpha), c3.ABGRToCol4(alpha), c4.ABGRToCol4(alpha)],
-		        halign = TextManager.halign,
-		        valign = TextManager.valign,
-		        scale = new(xscale, yscale),
-		        lineSep = sep,
-		        text = str
-	        });
+            CustomWindow.Draw(new GMTextJob()
+            {
+                screenPos = new(x, y),
+                asset = TextManager.fontAsset,
+                angle = angle,
+                Colors = [c1.ABGRToCol4(alpha), c2.ABGRToCol4(alpha), c3.ABGRToCol4(alpha), c4.ABGRToCol4(alpha)],
+                halign = TextManager.halign,
+                valign = TextManager.valign,
+                scale = new(xscale, yscale),
+                lineSep = LineSeparation(sep),
+                text = str,
+                wrapWidth = w
+            });
 
-	        return null;
+            return null;
         }
 
         [GMLFunction("draw_self")]
@@ -2151,7 +2475,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             var x1 = -_xsc * _xorig;
             var y1 = -_ysc * _yorig;
 
-            GL.BindTextureUnit(0, page.id);
+            GraphicsManager.BindTexture0(page.id);
 
             var yy = _y + (pageitem.TargetY * _ysc);
             for (var cy = 0; cy < ty; cy++, yy += oh)
@@ -2222,7 +2546,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             var x1 = -_xsc * _xorig;
             var y1 = -_ysc * _yorig;
 
-            GL.BindTextureUnit(0, texId);
+            GraphicsManager.BindTexture0(texId);
 
             var yy = _y;
             for (var cy = 0; cy < ty; cy++, yy += oh)
@@ -2233,7 +2557,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
                 for (var cx = 0; cx < tx; cx++, xx += ow)
                 {
                     var xx2 = xx + ow;
-                    
+
                     GraphicsManager.Draw(PrimitiveType.Triangles, [
                         new(new(xx + x1, yy + y1, GraphicsManager.GR_Depth), drawcol, new(0, 0)),
                         new(new(xx2 + x1, yy + y1, GraphicsManager.GR_Depth), drawcol, new(1, 0)),
@@ -2298,6 +2622,42 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return null;
         }
 
+        /// <summary>
+        /// Writes a surface out as a real PNG, both to the persisted store (so file_exists sees it
+        /// and it survives a reload, which is what a save-slot preview needs) and into
+        /// SpriteManager's screenshot cache (so the sprite_add that usually follows immediately
+        /// doesn't have to go back through the filesystem for it).
+        ///
+        /// Missing entirely before, which aborted the calling event: tijit engine 2 saves a preview
+        /// image from its hud's Draw event, so every frame it saved took the whole HUD down with it.
+        /// </summary>
+        [GMLFunction("surface_save")]
+        public static object? surface_save(object?[] args)
+        {
+            var surfaceId = args[0].Conv<int>();
+            var fname = args[1].Conv<string>();
+
+            if (!SurfaceManager.surface_exists(surfaceId))
+            {
+                DebugLog.LogWarning($"surface_save on nonexistent surface {surfaceId}.");
+                return null;
+            }
+
+            var width = SurfaceManager.GetSurfaceWidth(surfaceId);
+            var height = SurfaceManager.GetSurfaceHeight(surfaceId);
+            var pixels = new byte[width * height * 4];
+
+            GraphicsManager.FlushPolygonBatch(); // capture what has actually been drawn
+            GL.GetTextureSubImage(
+                SurfaceManager.GetSurfaceTexture(surfaceId), 0, 0, 0, 0, width, height, 1,
+                PixelFormat.Rgba, PixelType.UnsignedByte, pixels.Length, pixels);
+
+            GMFileSystemExtension.SavePersisted(FileFunctions.PersistedName(fname), PngEncoder.Encode(pixels, width, height));
+            SpriteManager._screenshotCache[Entry.ResolveDataWinPath(fname)] =
+                new ImageResult { Width = width, Height = height, Data = pixels };
+            return null;
+        }
+
         [GMLFunction("surface_exists")]
         public static object surface_exists(object?[] args)
         {
@@ -2334,10 +2694,21 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return SurfaceManager.GetSurfaceHeight(surface_id);
         }
 
-        [GMLFunction("surface_get_texture", GMLFunctionFlags.Stub, stubLogType: DebugLog.LogType.Warning)]
+        [GMLFunction("surface_get_texture")]
         public static object? surface_get_texture(object?[] args)
         {
-            return -1;
+            var surface_id = args[0].Conv<int>();
+
+            if (!SurfaceManager.surface_exists(surface_id))
+            {
+                return -1;
+            }
+
+            // Real GM's surface_get_texture returns an opaque "texture pointer" that other
+            // functions (texture_set_stage, texture_get_uvs, ...) accept anywhere a sprite's own
+            // texture handle would go. Rendering.SurfaceTexture wraps the raw GL handle so
+            // texture_set_stage can bind it directly without needing a SpritePageItem.
+            return new Rendering.SurfaceTexture(SurfaceManager.GetSurfaceTexture(surface_id));
         }
 
         [GMLFunction("surface_get_target")]
@@ -2418,7 +2789,29 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return null;
         }
 
-        // draw_surface_stretched_ext
+        [GMLFunction("draw_surface_stretched_ext")]
+        public static object? draw_surface_stretched_ext(object?[] args)
+        {
+            var id = args[0].Conv<int>();
+            var x = args[1].Conv<double>();
+            var y = args[2].Conv<double>();
+            var w = args[3].Conv<double>();
+            var h = args[4].Conv<double>();
+            var col = args[5].Conv<int>();
+            var alpha = args[6].Conv<double>();
+
+            var sw = SurfaceManager.GetSurfaceWidth(id);
+            var sh = SurfaceManager.GetSurfaceHeight(id);
+            if (sw <= 0 || sh <= 0)
+            {
+                return null;
+            }
+
+            // Stretching is a scale, so the requested size divides back out by the surface's own.
+            SurfaceManager.draw_surface_ext(id, x, y, w / sw, h / sh, 0, col, alpha);
+            return null;
+        }
+
 
         [GMLFunction("draw_surface_part")]
         public static object? draw_surface_part(object?[] args)
@@ -2438,23 +2831,60 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         [GMLFunction("draw_surface_part_ext")]
         public static object? draw_surface_part_ext(object?[] args)
         {
-	        var id = args[0].Conv<int>();
-	        var left = args[1].Conv<int>();
-	        var top = args[2].Conv<int>();
-	        var w = args[3].Conv<int>();
-	        var h = args[4].Conv<int>();
-	        var x = args[5].Conv<double>();
-	        var y = args[6].Conv<double>();
-	        var xscale = args[7].Conv<double>();
-	        var yscale = args[8].Conv<double>();
-	        var colour = args[9].Conv<int>();
-	        var alpha = args[10].Conv<double>();
+            var id = args[0].Conv<int>();
+            var left = args[1].Conv<int>();
+            var top = args[2].Conv<int>();
+            var w = args[3].Conv<int>();
+            var h = args[4].Conv<int>();
+            var x = args[5].Conv<double>();
+            var y = args[6].Conv<double>();
+            var xscale = args[7].Conv<double>();
+            var yscale = args[8].Conv<double>();
+            var colour = args[9].Conv<int>();
+            var alpha = args[10].Conv<double>();
 
             SurfaceManager.draw_surface_part_ext(id, left, top, w, h, x, y, xscale, yscale, colour, alpha);
-	        return null;
+            return null;
         }
 
-        // draw_surface_general
+        /// <summary>
+        /// A sub-rectangle of the surface, scaled, rotated and blended per corner. The four colour
+        /// arguments are top-left, top-right, bottom-right, bottom-left.
+        /// </summary>
+        [GMLFunction("draw_surface_general")]
+        public static object? draw_surface_general(object?[] args)
+        {
+            var id = args[0].Conv<int>();
+            var left = args[1].Conv<int>();
+            var top = args[2].Conv<int>();
+            var w = args[3].Conv<int>();
+            var h = args[4].Conv<int>();
+            var x = args[5].Conv<double>();
+            var y = args[6].Conv<double>();
+            var xscale = args[7].Conv<double>();
+            var yscale = args[8].Conv<double>();
+            var rot = args[9].Conv<double>();
+            var alpha = args[14].Conv<double>();
+
+            // SurfaceManager's part-draw takes one blend colour and no rotation, so those two
+            // arguments are honoured only as far as it can. Rather than silently dropping them --
+            // the "present but inert" trap this codebase has hit repeatedly -- anything that would
+            // be lost says so once, at warning level.
+            if (rot != 0)
+            {
+                DebugLog.LogWarning("draw_surface_general: rotation is not supported yet and is being ignored.");
+            }
+
+            var topLeft = args[10].Conv<int>();
+            if (args[11].Conv<int>() != topLeft || args[12].Conv<int>() != topLeft || args[13].Conv<int>() != topLeft)
+            {
+                DebugLog.LogWarning("draw_surface_general: per-corner blending is not supported yet; using the first colour.");
+            }
+
+            SurfaceManager.draw_surface_part_ext(id, left, top, w, h, x, y, xscale, yscale, topLeft, alpha);
+            return null;
+        }
+
 
         [GMLFunction("draw_surface_tiled")]
         public static object? draw_surface_tiled(object?[] args)
@@ -2505,6 +2935,52 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         // surface_save
         // surface_save_part
         // surface_getpixel
+
+        /// <summary>
+        /// The colour at a surface pixel, with no alpha -- surface_getpixel_ext is the variant that
+        /// includes it. Captured from GMS 1.4.9999: reading a red pixel gives 255 (0x0000FF), i.e.
+        /// a plain BGR colour rather than an ABGR one, so the alpha byte must not leak in.
+        /// </summary>
+        [GMLFunction("surface_getpixel")]
+        public static object surface_getpixel(object?[] args)
+        {
+            var values = SurfaceManager.ReadPixels(args[0].Conv<int>(), args[1].Conv<int>(), args[2].Conv<int>(), 1, 1);
+            return values[0] | (values[1] << 8) | (values[2] << 16);
+        }
+
+        /// <summary>
+        /// Reads a pixel from whatever is currently being drawn to -- the active surface if one is
+        /// set, otherwise the screen.
+        /// </summary>
+        [GMLFunction("draw_getpixel")]
+        public static object draw_getpixel(object?[] args)
+        {
+            var x = args[0].Conv<int>();
+            var y = args[1].Conv<int>();
+
+            var pixels = new byte[4];
+            GraphicsManager.FlushPolygonBatch(); // anything still queued has to land before we read
+            GL.ReadPixels(x, y, 1, 1, PixelFormat.Rgba, PixelType.UnsignedByte, pixels);
+            return pixels[0] | (pixels[1] << 8) | (pixels[2] << 16);
+        }
+
+        [GMLFunction("draw_ellipse_color")]
+        [GMLFunction("draw_ellipse_colour")]
+        public static object? draw_ellipse_color(object?[] args)
+        {
+            var x1 = args[0].Conv<double>();
+            var y1 = args[1].Conv<double>();
+            var x2 = args[2].Conv<double>();
+            var y2 = args[3].Conv<double>();
+            var col1 = args[4].Conv<int>();
+            var col2 = args[5].Conv<int>();
+            var outline = args[6].Conv<bool>();
+
+            // col1 is the centre and col2 the rim, the same gradient draw_circle_color uses.
+            DrawEllipseFan((x1 + x2) / 2, (y1 + y2) / 2, Math.Abs((x1 - x2) / 2), Math.Abs((y1 - y2) / 2),
+                outline, col1, col2);
+            return null;
+        }
 
         [GMLFunction("surface_getpixel_ext")]
         public static object? surface_getpixel_ext(object?[] args)

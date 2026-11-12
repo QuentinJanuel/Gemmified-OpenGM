@@ -43,8 +43,9 @@ public static class CameraManager
         float x_border = 0,
         float y_border = 0)
     {
-        var cam = new Camera { 
-            ViewX = room_x, 
+        var cam = new Camera
+        {
+            ViewX = room_x,
             ViewY = room_y,
             ViewWidth = width,
             ViewHeight = height,

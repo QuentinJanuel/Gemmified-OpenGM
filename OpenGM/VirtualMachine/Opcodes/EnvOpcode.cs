@@ -23,7 +23,8 @@ public static partial class VMExecutor
         // SUPER HACKY. there HAS to be a better way of doing this
         EnvStack.Push(null);
 
-        if (VerboseStackLogs) DebugLog.Log($"Pushenv {id}");
+        if (VerboseStackLogs)
+            DebugLog.Log($"Pushenv {id}");
 
         if (id == GMConstants.noone)
         {
@@ -76,15 +77,15 @@ public static partial class VMExecutor
         }
         else if (id is GMConstants.all)
         {
-	        foreach (var inst in InstanceManager.FindByLegacyValue(GMConstants.all))
-	        {
-		        var newCtx = new VMEnvFrame()
-		        {
-			        Self = inst,
-			        ObjectDefinition = inst.Definition
-		        };
+            foreach (var inst in InstanceManager.FindByLegacyValue(GMConstants.all))
+            {
+                var newCtx = new VMEnvFrame()
+                {
+                    Self = inst,
+                    ObjectDefinition = inst.Definition
+                };
 
-		        EnvStack.Push(newCtx);
+                EnvStack.Push(newCtx);
             }
         }
         else if (id is GMConstants.global)
@@ -111,8 +112,9 @@ public static partial class VMExecutor
             // dont run anything if no instances
             if (instances.Count == 0)
             {
-                if (VerboseStackLogs) DebugLog.Log($"no instances!");
-                
+                if (VerboseStackLogs)
+                    DebugLog.Log($"no instances!");
+
                 if (instruction.JumpToEnd)
                 {
                     return (ExecutionResult.JumpedToEnd, null);
@@ -129,7 +131,8 @@ public static partial class VMExecutor
                     ObjectDefinition = instance.Definition,
                 };
 
-                if (VerboseStackLogs) DebugLog.Log($"Pushing {instance.instanceId}");
+                if (VerboseStackLogs)
+                    DebugLog.Log($"Pushing {instance.instanceId}");
                 EnvStack.Push(newCtx);
             }
         }

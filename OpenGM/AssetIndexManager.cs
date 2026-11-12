@@ -65,10 +65,14 @@ public static class AssetIndexManager
     {
         return _nameToIndex.TryGetValue(name, out var index) ? index : -1;
     }
-    
+
     public static int GetIndex(AssetType type, string name)
     {
-        return _assetList[type].TryGetValue(name, out var index) ? index : -1;
+        // A game with no assets of a type at all has no entry for it -- common for a GMS1.4 game
+        // asked about sequences or animcurves. That's "no such asset", not an exception.
+        return _assetList.TryGetValue(type, out var assets) && assets.TryGetValue(name, out var index)
+            ? index
+            : -1;
     }
 
     public static string GetName(AssetType type, int index)
@@ -88,7 +92,10 @@ public static class AssetIndexManager
             return index;
         }
 
-        var highestIndex = _assetList[type].Values.Max();
+        // DefaultIfEmpty because a game can register the first asset of a type it shipped none of
+        // (timeline_add in a game with no editor-authored timelines, say) -- Max() on an empty
+        // sequence throws, and the right answer there is that the new asset gets index 0.
+        var highestIndex = _assetList[type].Values.DefaultIfEmpty(-1).Max();
         _assetList[type].Add(name, highestIndex + 1);
         _nameToIndex.Add(name, highestIndex + 1);
         return highestIndex + 1;

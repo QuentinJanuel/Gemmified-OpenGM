@@ -1,6 +1,7 @@
 ﻿using System.Collections;
 
 namespace OpenGM.VirtualMachine.BuiltInFunctions;
+
 public class RuntimeAnimCurve : GMLObject
 {
     public string name
@@ -348,7 +349,7 @@ public class RuntimeAnimCurvePoint : GMLObject
 
     public float value
     {
-        get =>SelfVariables["posx"].Conv<float>();
+        get => SelfVariables["posx"].Conv<float>();
 
         set
         {

@@ -6,6 +6,17 @@ using OpenTK.Mathematics;
 // and https://github.com/fendevel/Guide-to-Modern-OpenGL-Functions for dsa
 
 namespace OpenGM.Rendering;
+
+/// <summary>
+/// What surface_get_texture returns -- a raw GL texture handle for a surface's backing texture,
+/// wrapped so it's distinguishable from a sprite's own SpritePageItem handle wherever both are
+/// accepted (e.g. texture_set_stage).
+/// </summary>
+public class SurfaceTexture(int glHandle)
+{
+    public int GLHandle = glHandle;
+}
+
 public static class SurfaceManager
 {
     public static int application_surface = -1;
@@ -14,7 +25,7 @@ public static class SurfaceManager
 
     private static Dictionary<int, int> _framebuffers = new();
     private static int _currentSurfaceId = -1;
-    public static Stack<(int PrevSurfaceId, Vector4i PrevViewPort, Vector4 PrevViewArea)> SurfaceStack = new();
+    public static Stack<(int PrevSurfaceId, Vector4i PrevViewPort, Vector4 PrevViewArea, float PrevViewAreaAngle)> SurfaceStack = new();
 
     public static bool surface_exists(int surface) => _framebuffers.ContainsKey(surface);
 
@@ -28,8 +39,10 @@ public static class SurfaceManager
 
         GraphicsManager.PushMessage($"SurfaceSetTarget {surface}");
 
-        SurfaceStack.Push((_currentSurfaceId, GraphicsManager.ViewPort,  GraphicsManager.ViewArea));
+        SurfaceStack.Push((_currentSurfaceId, GraphicsManager.ViewPort, GraphicsManager.ViewArea, GraphicsManager.ViewAreaAngle));
         _currentSurfaceId = surface;
+
+        GraphicsManager.FlushPolygonBatch(); // queued geometry belongs to the PREVIOUS target
 
         var buffer = _framebuffers[surface];
         // future draws will draw to this fbo
@@ -39,7 +52,7 @@ public static class SurfaceManager
         var height = GetSurfaceHeight(surface);
         GraphicsManager.SetViewPort(0, 0, width, height);
         GraphicsManager.SetViewArea(0, 0, width, height, 0);
-        
+
         // even if drawing to a view surface or app surface, itll use the whole area
 
         GraphicsManager.PopMessage();
@@ -53,15 +66,17 @@ public static class SurfaceManager
     {
         GraphicsManager.PushMessage($"SurfaceResetTarget");
 
-        var (prevSurfaceId, prevViewPort, prevViewArea) = SurfaceStack.Pop();
+        GraphicsManager.FlushPolygonBatch(); // queued geometry belongs to the surface being left
+
+        var (prevSurfaceId, prevViewPort, prevViewArea, prevViewAreaAngle) = SurfaceStack.Pop();
         _currentSurfaceId = prevSurfaceId;
-        
+
         // -1 means draw to display. prev port/area will be framebuffer size set by OnFramebufferResize
         var buffer = prevSurfaceId == -1 ? 0 : _framebuffers[prevSurfaceId];
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, buffer);
         GraphicsManager.SetViewPort(prevViewPort);
-        GraphicsManager.SetViewArea(prevViewArea);
-        
+        GraphicsManager.SetViewArea(prevViewArea, prevViewAreaAngle);
+
         GraphicsManager.PopMessage(); // set target
 
         return true;
@@ -72,7 +87,7 @@ public static class SurfaceManager
     public static int CreateSurface(int width, int height, int format) // TODO: format
     {
         GraphicsManager.PushMessage($"CreateSurface width:{width}, height:{height} ({_nextId})");
-        
+
         // Generate framebuffer
         GL.CreateFramebuffers(1, out int buffer);
         GraphicsManager.LabelObject(ObjectLabelIdentifier.Framebuffer, buffer, $"surface {_nextId}");
@@ -82,7 +97,7 @@ public static class SurfaceManager
         GraphicsManager.LabelObject(ObjectLabelIdentifier.Texture, texture, $"surface {_nextId} texture");
         GL.TextureStorage2D(texture, 1, SizedInternalFormat.Rgba8, width, height);
         GL.TextureParameter(texture, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
-        GL.TextureParameter(texture,  TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
+        GL.TextureParameter(texture, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
 
         // Attach texture to framebuffer
         GL.NamedFramebufferTexture(buffer, FramebufferAttachment.ColorAttachment0, texture, 0);
@@ -141,6 +156,37 @@ public static class SurfaceManager
     public static int DeviceWidth => CustomWindow.Instance.FramebufferSize.X;
     public static int DeviceHeight => CustomWindow.Instance.FramebufferSize.Y;
 
+    /// <summary>
+    /// Creates the application surface if it isn't there yet.
+    ///
+    /// Called from <see cref="SetApplicationSurface"/> every frame, but also once at startup
+    /// (Entry) -- real GM has the application surface up before any game code runs, and games read
+    /// it that early: Vandal's Game Start event does
+    /// `display_set_gui_size(surface_get_width(application_surface), ...)`. Created lazily in the
+    /// draw loop instead, that call ran a frame too early and got -1 back from surface_get_width,
+    /// which made the GUI view area degenerate and smeared one texel of whatever the game drew in
+    /// Draw GUI (its "Game Over" sprite) across the whole screen.
+    /// </summary>
+    public static void EnsureApplicationSurface()
+    {
+        if (application_surface >= 0 && surface_exists(application_surface))
+        {
+            return;
+        }
+
+        // creatingApplicationSurface = true
+        application_surface = CreateSurface(ApplicationWidth, ApplicationHeight, -1);
+        {
+            var buffer = _framebuffers[application_surface];
+            var texture = GetSurfaceTexture(application_surface);
+            GraphicsManager.LabelObject(ObjectLabelIdentifier.Framebuffer, buffer, "app surface");
+            GraphicsManager.LabelObject(ObjectLabelIdentifier.Texture, texture, "app surface texture");
+        }
+        // wind_regionwidth = ApplicationWidth
+        // creatingApplicationSurface = false
+        // wind_regionheight = ApplicationHeight
+    }
+
     // https://github.com/YoYoGames/GameMaker-HTML5/blob/develop/scripts/yyRoom.js#L3842
     // also copied from cpp
     public static void SetApplicationSurface()
@@ -167,20 +213,7 @@ public static class SurfaceManager
             }
 
             //Create Application Surface?
-            if (application_surface < 0 || !surface_exists(application_surface))
-            {
-                // creatingApplicationSurface = true
-                application_surface = CreateSurface(ApplicationWidth, ApplicationHeight, -1);
-                {
-                    var buffer = _framebuffers[application_surface];
-                    var texture = GetSurfaceTexture(application_surface);
-                    GraphicsManager.LabelObject(ObjectLabelIdentifier.Framebuffer, buffer, "app surface");
-                    GraphicsManager.LabelObject(ObjectLabelIdentifier.Texture, texture, "app surface texture");
-                }
-                // wind_regionwidth = ApplicationWidth
-                // creatingApplicationSurface = false
-                // wind_regionheight = ApplicationHeight
-            }
+            EnsureApplicationSurface();
 
             //Resize the surface?
             if (NewApplicationSize)
@@ -208,7 +241,7 @@ public static class SurfaceManager
     public static void ResizeSurface(int id, int w, int h)
     {
         GraphicsManager.PushMessage($"ResizeSurface {id} {w}x{h}");
-        
+
         var buffer = _framebuffers[id];
         // delete existing texture if there is one
         var texture = GetSurfaceTexture(id);
@@ -219,7 +252,7 @@ public static class SurfaceManager
         GraphicsManager.LabelObject(ObjectLabelIdentifier.Texture, texture, $"surface {_nextId} texture");
         GL.TextureStorage2D(texture, 1, SizedInternalFormat.Rgba8, w, h);
         GL.TextureParameter(texture, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
-        GL.TextureParameter(texture,  TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
+        GL.TextureParameter(texture, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
 
         // Attach texture to framebuffer
         GL.NamedFramebufferTexture(buffer, FramebufferAttachment.ColorAttachment0, texture, 0);
@@ -228,7 +261,7 @@ public static class SurfaceManager
         {
             DebugLog.LogError($"ERROR: Framebuffer is not complete!\n{Environment.StackTrace}");
         }
-        
+
         GraphicsManager.PopMessage();
     }
 
@@ -257,27 +290,13 @@ public static class SurfaceManager
     }
 
     // https://github.com/YoYoGames/GameMaker-HTML5/blob/develop/scripts/functions/Function_Surface.js#L842
-    public static void draw_surface(int id, double x, double y) => 
+    public static void draw_surface(int id, double x, double y) =>
         draw_surface_stretched(id, x, y, GetSurfaceWidth(id), GetSurfaceHeight(id));
 
     public static void draw_surface_stretched(int id, double x, double y, double w, double h)
     {
-        // draw rectangle with that texture
-        GL.BindTextureUnit(0, GetSurfaceTexture(id));
-        // we drew into this fbo earlier, get its texture data
-        /*
-        GL.Begin(PrimitiveType.Quads);
-        // the order here is different from sprite drawing or else everything gets y flipped????
-        GL.TexCoord2(0, 1);
-        GL.Vertex2(x, y);
-        GL.TexCoord2(1, 1);
-        GL.Vertex2(x + w, y);
-        GL.TexCoord2(1, 0);
-        GL.Vertex2(x + w, y + h);
-        GL.TexCoord2(0, 0);
-        GL.Vertex2(x, y + h);
-        GL.End();
-        */
+        // draw rectangle with that texture; we drew into this fbo earlier, get its texture data
+        GraphicsManager.BindTexture0(GetSurfaceTexture(id));
         GraphicsManager.Draw(PrimitiveType.TriangleFan, [
             new(new(x, y, GraphicsManager.GR_Depth), Color4.White, new(0, 0)),
             new(new(x + w, y, GraphicsManager.GR_Depth), Color4.White, new(1, 0)),
@@ -291,7 +310,7 @@ public static class SurfaceManager
         var w = GetSurfaceWidth(id);
         var h = GetSurfaceHeight(id);
 
-        GL.BindTextureUnit(0, GetSurfaceTexture(id));
+        GraphicsManager.BindTexture0(GetSurfaceTexture(id));
 
         var scaledWidth = w * xscale;
         var scaledHeight = h * yscale;
@@ -313,38 +332,38 @@ public static class SurfaceManager
 
     public static void draw_surface_part(int id, int left, int top, int w, int h, double x, double y)
     {
-	    draw_surface_part_ext(id, left, top, w, h, x, y, 1, 1, (int)Color4.White.Col4ToABGR(), 1);
+        draw_surface_part_ext(id, left, top, w, h, x, y, 1, 1, (int)Color4.White.Col4ToABGR(), 1);
     }
 
     public static void draw_surface_part_ext(int id, int left, int top, int w, int h, double x, double y, double xscale, double yscale, int colour, double alpha)
     {
-	    var surfWidth = (double)GetSurfaceWidth(id);
-	    var surfHeight = (double)GetSurfaceHeight(id);
+        var surfWidth = (double)GetSurfaceWidth(id);
+        var surfHeight = (double)GetSurfaceHeight(id);
 
-	    GL.BindTextureUnit(0, GetSurfaceTexture(id));
+        GraphicsManager.BindTexture0(GetSurfaceTexture(id));
 
-	    var vertexOne = new Vector3d(x, y, GraphicsManager.GR_Depth);
-	    var vertexTwo = new Vector3d(x + (w * xscale), y, GraphicsManager.GR_Depth);
-	    var vertexThree = new Vector3d(x + (w * xscale), y + (h * yscale), GraphicsManager.GR_Depth);
-	    var vertexFour = new Vector3d(x, y + (h * yscale), GraphicsManager.GR_Depth);
+        var vertexOne = new Vector3d(x, y, GraphicsManager.GR_Depth);
+        var vertexTwo = new Vector3d(x + (w * xscale), y, GraphicsManager.GR_Depth);
+        var vertexThree = new Vector3d(x + (w * xscale), y + (h * yscale), GraphicsManager.GR_Depth);
+        var vertexFour = new Vector3d(x, y + (h * yscale), GraphicsManager.GR_Depth);
 
-	    var uvLeft = left / surfWidth;
-	    var uvRight = (left + w) / surfWidth;
-	    var uvTop = top / surfHeight;
-	    var uvBottom = (top + h) / surfHeight;
+        var uvLeft = left / surfWidth;
+        var uvRight = (left + w) / surfWidth;
+        var uvTop = top / surfHeight;
+        var uvBottom = (top + h) / surfHeight;
 
-	    var uvOne = new Vector2d(uvLeft, uvTop);
-	    var uvTwo = new Vector2d(uvRight, uvTop);
-	    var uvThree = new Vector2d(uvRight, uvBottom);
-	    var uvFour = new Vector2d(uvLeft, uvBottom);
+        var uvOne = new Vector2d(uvLeft, uvTop);
+        var uvTwo = new Vector2d(uvRight, uvTop);
+        var uvThree = new Vector2d(uvRight, uvBottom);
+        var uvFour = new Vector2d(uvLeft, uvBottom);
 
-	    var c = colour.ABGRToCol4(alpha);
+        var c = colour.ABGRToCol4(alpha);
         GraphicsManager.Draw(PrimitiveType.TriangleFan, [
-		    new(vertexOne, c, uvOne),
-		    new(vertexTwo, c, uvTwo),
-		    new(vertexThree, c, uvThree),
-		    new(vertexFour, c, uvFour)
-	    ]);
+            new(vertexOne, c, uvOne),
+            new(vertexTwo, c, uvTwo),
+            new(vertexThree, c, uvThree),
+            new(vertexFour, c, uvFour)
+        ]);
     }
 
     public static int GetSurfaceTexture(int surfaceId)
@@ -361,11 +380,13 @@ public static class SurfaceManager
             return;
         }
 
+        GraphicsManager.FlushPolygonBatch(); // the copy has to include anything still queued
+
         var srcBuffer = _framebuffers[src];
         var dstBuffer = _framebuffers[dest];
 
         GL.BlitNamedFramebuffer(
-            srcBuffer, 
+            srcBuffer,
             dstBuffer,
             xs, ys, xs + ws, ys + hs,
             x, y, x + ws, y + hs,
@@ -375,6 +396,10 @@ public static class SurfaceManager
 
     public static byte[] ReadPixels(int surfaceId, int x, int y, int w, int h)
     {
+        // Nothing may still be queued when a game reads the surface back -- it would read stale
+        // pixels and the queued geometry would then land on top afterwards.
+        GraphicsManager.FlushPolygonBatch();
+
         /*
         BindSurfaceFramebuffer(surfaceId);
 

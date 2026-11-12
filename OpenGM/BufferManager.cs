@@ -5,6 +5,7 @@ using OpenTK.Graphics.OpenGL4;
 using System.Text;
 
 namespace OpenGM;
+
 public static class BufferManager
 {
     private static int _nextId;
@@ -31,29 +32,38 @@ public static class BufferManager
         return _nextId++;
     }
 
+    /// <summary>
+    /// Writes a buffer out, to the same place every other write in this engine goes.
+    ///
+    /// This used to go straight through <c>File.WriteAllBytes</c> at the game folder, which on the
+    /// browser build lands in the wasm's in-memory filesystem: the write showed in neither store,
+    /// did not survive a reload, and was not where a read looks first. A game saving through a
+    /// buffer -- which is how GameMaker Studio games usually save -- had its progress quietly
+    /// evaporate, and code that transfers a sprite this way could not load the picture it had just
+    /// written.
+    ///
+    /// TODO : what happens if the filename is already taken? overwritten? error? find out
+    /// </summary>
     public static void SaveBuffer(int bufferIndex, string filename)
     {
-        var buffer = Buffers[bufferIndex];
-
-        // TODO : what happens if the filename is already taken? overwritten? error? find out
-        var filepath = Path.Combine(Entry.DataWinFolder, filename);
-        File.WriteAllBytes(filepath, buffer.Data);
+        GMFileSystemExtension.WriteGameFile(filename, Buffers[bufferIndex].Data);
     }
 
+    /// <summary>
+    /// Reads a buffer back in -- the game's own writes first, then what it shipped with, then the
+    /// real filesystem. See <see cref="GMFileSystemExtension.ReadGameFile"/>.
+    /// </summary>
     public static int LoadBuffer(string filename)
     {
-        var filepath = Path.Combine(Entry.DataWinFolder, filename);
+        var bytes = GMFileSystemExtension.ReadGameFile(filename);
 
-        if (!File.Exists(filepath))
+        if (bytes == null)
         {
-            DebugLog.LogError($"LoadBuffer: {filepath} doesnt exist.");
+            DebugLog.LogError($"LoadBuffer: {filename} doesnt exist.");
             return -1;
         }
 
-        var bytes = File.ReadAllBytes(filepath);
-
-        var newId = CreateBuffer(bytes.Length, BufferType.Grow, 1, bytes);
-        return newId;
+        return CreateBuffer(bytes.Length, BufferType.Grow, 1, bytes);
     }
 
     // https://github.com/YoYoGames/GameMaker-HTML5/blob/12fd29600c6cd12f6663059b7a7c15fb8740080f/scripts/yyBuffer.js#L512
@@ -162,57 +172,57 @@ public static class BufferManager
                 res = (sbyte)buffer.Data[buffer.BufferIndex++];
                 break;
             case BufferDataType.buffer_u16:
-            {
-                var bytes = new[]
                 {
-                    buffer.Data[buffer.BufferIndex++], 
+                    var bytes = new[]
+                    {
+                    buffer.Data[buffer.BufferIndex++],
                     buffer.Data[buffer.BufferIndex++]
                 };
-                res = BitConverter.ToUInt16(bytes, 0);
-                break;
-            }
+                    res = BitConverter.ToUInt16(bytes, 0);
+                    break;
+                }
             case BufferDataType.buffer_s16:
-            {
-                var bytes = new[]
                 {
-                    buffer.Data[buffer.BufferIndex++], 
+                    var bytes = new[]
+                    {
+                    buffer.Data[buffer.BufferIndex++],
                     buffer.Data[buffer.BufferIndex++]
                 };
-                res = BitConverter.ToInt16(bytes, 0);
-                break;
-            }
+                    res = BitConverter.ToInt16(bytes, 0);
+                    break;
+                }
             case BufferDataType.buffer_f16:
                 throw new NotImplementedException();
             case BufferDataType.buffer_u32:
-            {
-                var bytes = new[]
                 {
+                    var bytes = new[]
+                    {
                     buffer.Data[buffer.BufferIndex++],
                     buffer.Data[buffer.BufferIndex++],
                     buffer.Data[buffer.BufferIndex++],
                     buffer.Data[buffer.BufferIndex++]
                 };
-                res = BitConverter.ToUInt32(bytes, 0);
-                break;
-            }
+                    res = BitConverter.ToUInt32(bytes, 0);
+                    break;
+                }
             case BufferDataType.buffer_s32:
-            {
-                var bytes = new[]
                 {
-                    buffer.Data[buffer.BufferIndex++], 
-                    buffer.Data[buffer.BufferIndex++], 
-                    buffer.Data[buffer.BufferIndex++], 
+                    var bytes = new[]
+                    {
+                    buffer.Data[buffer.BufferIndex++],
+                    buffer.Data[buffer.BufferIndex++],
+                    buffer.Data[buffer.BufferIndex++],
                     buffer.Data[buffer.BufferIndex++]
                 };
-                res = BitConverter.ToInt32(bytes, 0);
-                break;
-            }
+                    res = BitConverter.ToInt32(bytes, 0);
+                    break;
+                }
             case BufferDataType.buffer_f32:
                 throw new NotImplementedException();
             case BufferDataType.buffer_u64:
-            {
-                var bytes = new[]
                 {
+                    var bytes = new[]
+                    {
                     buffer.Data[buffer.BufferIndex++],
                     buffer.Data[buffer.BufferIndex++],
                     buffer.Data[buffer.BufferIndex++],
@@ -222,9 +232,9 @@ public static class BufferManager
                     buffer.Data[buffer.BufferIndex++],
                     buffer.Data[buffer.BufferIndex++]
                 };
-                res = BitConverter.ToUInt64(bytes, 0);
-                break;
-            }
+                    res = BitConverter.ToUInt64(bytes, 0);
+                    break;
+                }
             case BufferDataType.buffer_f64:
                 throw new NotImplementedException();
         }
@@ -251,27 +261,28 @@ public static class BufferManager
             }
         }
 
-        // Out of space?
-        if (buffer.BufferIndex >= buffer.Size)
+        // Out of space? Not for a grow buffer, which grows below instead -- this used to drop a write
+        // that began exactly at the end of one.
+        if (buffer.BufferIndex >= buffer.Size && buffer.Type != BufferType.Grow)
         {
             return type == BufferDataType.buffer_string ? "" : -3; // eBuffer_OutOfBounds
         }
 
         var sizeNeeded = BufferDataTypeToSize(type);
-        // TODO : do that unicode -> utf8 stuff
-        if (type is BufferDataType.buffer_string)
+        // UTF-8, as GameMaker writes strings and as ReadBuffer decodes them. buffer_string carries a
+        // NUL terminator and buffer_text does not.
+        byte[]? text = null;
+        if (type is BufferDataType.buffer_string or BufferDataType.buffer_text)
         {
-            sizeNeeded = value.Conv<string>().Length;
+            text = Encoding.UTF8.GetBytes(value.Conv<string>());
+            sizeNeeded = text.Length + (type is BufferDataType.buffer_string ? 1 : 0);
         }
 
-        if (type is BufferDataType.buffer_text)
+        if (buffer.BufferIndex + sizeNeeded > buffer.Size)
         {
-            sizeNeeded = value.Conv<string>().Length + 1;
-        }
-
-        if (buffer.BufferIndex + sizeNeeded > buffer.Size) {
             // Resize buffer...
-            if (buffer.Type is BufferType.Grow) {
+            if (buffer.Type is BufferType.Grow)
+            {
                 var newSize = buffer.Size;
 
                 if (newSize < 4)
@@ -279,13 +290,17 @@ public static class BufferManager
                     newSize = 4;
                 }
 
-                while (buffer.BufferIndex + sizeNeeded > newSize) {
-                    newSize <<= 1; 
+                while (buffer.BufferIndex + sizeNeeded > newSize)
+                {
+                    newSize <<= 1;
                 }
 
                 buffer.Resize(newSize);
-            } else {
-                if (buffer.Type is not BufferType.Wrap) {
+            }
+            else
+            {
+                if (buffer.Type is not BufferType.Wrap)
+                {
                     return type == BufferDataType.buffer_string ? "" : -2;      // out of space
                 }
             }
@@ -300,16 +315,15 @@ public static class BufferManager
                 goto case BufferDataType.buffer_u8;
             case BufferDataType.buffer_u8:
                 buffer.Data[buffer.BufferIndex++] = Convert.ToByte(value);
-                break;  
+                break;
             case BufferDataType.buffer_string:
             case BufferDataType.buffer_text:
-                var str = value.Conv<string>();
-                foreach (var chr in str)
+                foreach (var b in text!)
                 {
-                    buffer.Data[buffer.BufferIndex++] = (byte)chr;
+                    buffer.Data[buffer.BufferIndex++] = b;
                 }
                 // "text" mode doesn't add a NULL at the end.
-                if (type is BufferDataType.buffer_text)
+                if (type is BufferDataType.buffer_string)
                 {
                     buffer.Data[buffer.BufferIndex++] = 0;
                 }
@@ -319,58 +333,60 @@ public static class BufferManager
                 buffer.Data[buffer.BufferIndex++] = Convert.ToByte(value);
                 break;
             case BufferDataType.buffer_u16:
-            {
-                var bytes = BitConverter.GetBytes(Convert.ToUInt16(value));
-                for (var i = 0; i < bytes.Length; i++)
                 {
-                    buffer.Data[buffer.BufferIndex++] = bytes[i];
+                    var bytes = BitConverter.GetBytes(Convert.ToUInt16(value));
+                    for (var i = 0; i < bytes.Length; i++)
+                    {
+                        buffer.Data[buffer.BufferIndex++] = bytes[i];
+                    }
+                    break;
                 }
-                break;
-            }
             case BufferDataType.buffer_s16:
-            {
-                var bytes = BitConverter.GetBytes(Convert.ToInt16(value));
-                for (var i = 0; i < bytes.Length; i++)
                 {
-                    buffer.Data[buffer.BufferIndex++] = bytes[i];
+                    var bytes = BitConverter.GetBytes(Convert.ToInt16(value));
+                    for (var i = 0; i < bytes.Length; i++)
+                    {
+                        buffer.Data[buffer.BufferIndex++] = bytes[i];
+                    }
+                    break;
                 }
-                break;
-            }
             case BufferDataType.buffer_f16:
                 throw new NotImplementedException();
             case BufferDataType.buffer_u32:
-            {
-                var bytes = BitConverter.GetBytes(Convert.ToUInt32(value));
-                for (var i = 0; i < bytes.Length; i++)
                 {
-                    buffer.Data[buffer.BufferIndex++] = bytes[i];
+                    var bytes = BitConverter.GetBytes(Convert.ToUInt32(value));
+                    for (var i = 0; i < bytes.Length; i++)
+                    {
+                        buffer.Data[buffer.BufferIndex++] = bytes[i];
+                    }
+                    break;
                 }
-                break;
-            }
             case BufferDataType.buffer_s32:
-            {
-                var bytes = BitConverter.GetBytes(Convert.ToInt32(value));
-                for (var i = 0; i < bytes.Length; i++)
                 {
-                    buffer.Data[buffer.BufferIndex++] = bytes[i];
+                    var bytes = BitConverter.GetBytes(Convert.ToInt32(value));
+                    for (var i = 0; i < bytes.Length; i++)
+                    {
+                        buffer.Data[buffer.BufferIndex++] = bytes[i];
+                    }
+                    break;
                 }
-                break;
-            }
             case BufferDataType.buffer_f32:
                 throw new NotImplementedException();
             case BufferDataType.buffer_u64:
-            {
-                var bytes = BitConverter.GetBytes(Convert.ToUInt64(value));
-                for (var i = 0; i < bytes.Length; i++)
                 {
-                    buffer.Data[buffer.BufferIndex++] = bytes[i];
+                    var bytes = BitConverter.GetBytes(Convert.ToUInt64(value));
+                    for (var i = 0; i < bytes.Length; i++)
+                    {
+                        buffer.Data[buffer.BufferIndex++] = bytes[i];
+                    }
+                    break;
                 }
-                break;
-            }
             case BufferDataType.buffer_f64:
                 throw new NotImplementedException();
         }
 
+        // What was written is now there to be read, as Buffer.Poke already records.
+        buffer.UpdateUsedSize();
         return null;
     }
 

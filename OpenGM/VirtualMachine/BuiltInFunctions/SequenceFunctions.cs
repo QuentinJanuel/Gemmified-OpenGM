@@ -1,9 +1,9 @@
 ﻿using OpenGM.IO;
 using OpenGM.Loading;
+using OpenGM.Sequences;
 using System;
 using System.Collections.Generic;
 using System.Text;
-using OpenGM.Sequences;
 
 namespace OpenGM.VirtualMachine.BuiltInFunctions;
 

@@ -6,6 +6,7 @@ using System.Text;
 using UndertaleModLib;
 using UndertaleModLib.Decompiler;
 using UndertaleModLib.Models;
+using UndertaleModLib.Util;
 using static UndertaleModLib.Models.UndertaleSequence;
 using EventType = OpenGM.VirtualMachine.EventType;
 using Track = OpenGM.SerializedFiles.Track;
@@ -34,6 +35,7 @@ public static class GameConverter
             ExportExtensions(writer, data);
             ExportGlobalInitCode(writer, data);
             ExportObjectDefinitions(writer, data);
+            ExportTimelines(writer, data);
             ExportBackgrounds(writer, data);
             ExportRooms(writer, data);
             ConvertSprites(writer, data, data.Sprites);
@@ -153,12 +155,26 @@ public static class GameConverter
         {
             var asset = new Extension();
             asset.Name = extension.Name.Content;
-            
+
             foreach (var file in extension.Files)
             {
                 var fileAsset = new ExtensionFile();
                 fileAsset.Name = file.Filename.Content;
                 fileAsset.Kind = (ExtensionKind)file.Kind;
+
+                // Real GM calls this once, automatically, before any room's Create event -- games
+                // rely on it to seed globals a GML-kind extension's own functions depend on (e.g.
+                // jtool's bundled TGMS Tweener library sets global.TGMS_SharedTweener = noone here;
+                // without it the global keeps its auto-zero default, which coincidentally collides
+                // with object asset index 0 the first time anything calls the library).
+                if (!string.IsNullOrEmpty(file.InitScript?.Content))
+                {
+                    var initScript = data.Scripts.FirstOrDefault(x => x.Name.Content == file.InitScript.Content);
+                    if (initScript != null)
+                    {
+                        fileAsset.InitScript = data.Code.IndexOf(initScript.Code);
+                    }
+                }
 
                 foreach (var function in file.Functions)
                 {
@@ -434,7 +450,7 @@ public static class GameConverter
                                         instruction.PushFunction = true;
                                         instruction.StringData = value[10..];
                                     }
-                                    
+
                                 }
 
                                 break;
@@ -450,7 +466,13 @@ public static class GameConverter
                                 instruction.BoolData = bool.Parse(value);
                                 break;
                             case VMType.d:
-                                instruction.DoubleData = double.Parse(value);
+                                // The disassembly text always uses "." as the decimal point
+                                // (baked in by UndertaleModLib's own formatting, not locale-aware),
+                                // regardless of what culture this process happens to run under --
+                                // parsing with the current culture broke the moment this ran for
+                                // real inside a browser tab whose locale uses "," instead (e.g.
+                                // "0.45" isn't a valid number under most non-English cultures).
+                                instruction.DoubleData = double.Parse(value, System.Globalization.CultureInfo.InvariantCulture);
                                 break;
                             case VMType.e:
                                 instruction.ShortData = short.Parse(value);
@@ -491,27 +513,27 @@ public static class GameConverter
                     case VMOpcode.PUSHAC:
                         break;
                     case VMOpcode.PUSHREF:
-                    {
-                        var parameterString = line.Substring(opcode.Length + 1);
-                        var parameters = parameterString.Split(' ');
-                        if (parameters.Length == 1)
                         {
-                            if (int.TryParse(parameterString, out var intVal))
+                            var parameterString = line.Substring(opcode.Length + 1);
+                            var parameters = parameterString.Split(' ');
+                            if (parameters.Length == 1)
                             {
-                                instruction.IntData = intVal;
+                                if (int.TryParse(parameterString, out var intVal))
+                                {
+                                    instruction.IntData = intVal;
+                                }
+                                else
+                                {
+                                    instruction.IntData = GMConstants.FIRST_INSTANCE_ID + data!.Scripts.IndexOf(data.Scripts.First(x => x.Name.Content == parameterString));
+                                }
                             }
                             else
                             {
-                                instruction.IntData = GMConstants.FIRST_INSTANCE_ID +  data!.Scripts.IndexOf(data.Scripts.First(x => x.Name.Content == parameterString));
+                                throw new NotImplementedException();
                             }
-                        }
-                        else
-                        {
-                            throw new NotImplementedException();
-                        }
 
-                        break;
-                    }
+                            break;
+                        }
                     default:
                         throw new NotImplementedException($"Opcode {enumOperation} not implemented");
                 }
@@ -650,6 +672,16 @@ public static class GameConverter
         }
     }
 
+    /// <summary>
+    /// Texture page encodings written by <see cref="ExportPages"/> and read back by
+    /// GameLoader.LoadTexturePages. A page carries whichever of these needs the least work, so the
+    /// tag says which.
+    /// </summary>
+    public const byte PageFormatPng = 0;
+
+    /// <inheritdoc cref="PageFormatPng"/>
+    public const byte PageFormatQoi = 1;
+
     public static void ExportPages(BinaryWriter writer, UndertaleData data)
     {
         Console.Write($"Exporting texture pages...");
@@ -659,8 +691,38 @@ public static class GameConverter
         {
             // dont even need a class for this
             var pageName = page.Name.Content;
-            var blob = page.TextureData.Image.ConvertToPng().ToSpan();
+            var image = page.TextureData.Image;
+
+            // A page is written in whichever format costs the least to produce here and to decode
+            // on the other side: PNG bytes straight through if the game already shipped PNG pages
+            // (stb decodes those at load), otherwise GameMaker's own QOI.
+            //
+            // This must NOT call ConvertToPng() on a non-PNG page, which is what it used to do
+            // unconditionally: that re-encodes through ImageMagick, and Magick.Native has no wasm
+            // build at all -- its static init throws "Wasm is an unsupported architecture, only
+            // X64, Arm64 and X86 are supported", so in the browser every game whose pages are
+            // QOI/BZ2+QOI (GMS 2.2+, e.g. tijit engine 2) died right here, before its first frame.
+            // QOI is also strictly less work even where ImageMagick does run: UndertaleModLib's
+            // QoiConverter is pure managed, and neither side has to deflate or inflate anything.
+            //
+            // DDS pages are the one remaining format with no managed decoder in the tree; they
+            // still go through ImageMagick below (fine natively, still fatal in the browser) and
+            // want a real DDS decoder if a game ever turns up shipping them.
+            byte format;
+            ReadOnlySpan<byte> blob;
+            if (image.Format == GMImage.ImageFormat.Png)
+            {
+                format = PageFormatPng;
+                blob = image.ToSpan();
+            }
+            else
+            {
+                format = PageFormatQoi;
+                blob = image.ConvertToQoi().ToSpan();
+            }
+
             writer.Write(pageName);
+            writer.Write(format);
             writer.Write(blob.Length);
             writer.Write(blob);
         }
@@ -696,8 +758,27 @@ public static class GameConverter
                 SepMasks = sprite.SepMasks,
                 OriginX = sprite.OriginX,
                 OriginY = sprite.OriginY,
-                PlaybackSpeed = sprite.GMS2PlaybackSpeed,
-                PlaybackSpeedType = sprite.GMS2PlaybackSpeedType,
+                // GMS2PlaybackSpeed/Type are only ever actually present in the file for GMS2+
+                // special-type sprites (UndertaleSprite.Unserialize only reads them when
+                // IsSpecialType && data.IsGameMaker2()) -- for every pre-GMS2 sprite (GM8/GMS1,
+                // like Indigo Needle's) this is just UndertaleModLib's compiled-in default
+                // (15.0f, FramesPerSecond), not real data. GM8/GMS1 has no such concept: image_index
+                // just advances by image_speed every step, full stop (confirmed in OpenGMK's
+                // instance.rs/game.rs -- no FPS scaling anywhere). PlaybackSpeed=1 with
+                // FramesPerGameFrame reproduces that exactly through GamemakerObject.GetIndexIncrement.
+                PlaybackSpeed = sprite.IsSpecialType && data.IsGameMaker2() ? sprite.GMS2PlaybackSpeed : 1f,
+                PlaybackSpeedType = sprite.IsSpecialType && data.IsGameMaker2() ? sprite.GMS2PlaybackSpeedType : AnimSpeedType.FramesPerGameFrame,
+                // Null for everything that doesn't use it, which is nearly every sprite -- see
+                // SpriteManager's nine-slice draw for what it does when it is there.
+                NineSlice = sprite.V3NineSlice is null ? null : new NineSliceData
+                {
+                    Enabled = sprite.V3NineSlice.Enabled,
+                    Left = sprite.V3NineSlice.Left,
+                    Top = sprite.V3NineSlice.Top,
+                    Right = sprite.V3NineSlice.Right,
+                    Bottom = sprite.V3NineSlice.Bottom,
+                    TileModes = sprite.V3NineSlice.TileModes.Select(x => (int)x).ToArray()
+                },
                 Textures = new List<SpritePageItem>()
             };
 
@@ -920,6 +1001,59 @@ public static class GameConverter
         Console.WriteLine(" Done!");
     }
 
+    public static void ExportTimelines(BinaryWriter writer, UndertaleData data)
+    {
+        Console.Write($"Exporting timelines...");
+
+        var exportableCode = data.Code.ToList();
+
+        writer.Write(data.Timelines.Count);
+        for (var i = 0; i < data.Timelines.Count; i++)
+        {
+            var timeline = data.Timelines[i];
+
+            var asset = new Timeline
+            {
+                AssetId = i,
+                Name = timeline.Name.Content
+            };
+
+            foreach (var moment in timeline.Moments)
+            {
+                if (moment.Event == null)
+                {
+                    continue;
+                }
+
+                var codeIds = moment.Event
+                    .Where(action => action?.CodeId != null)
+                    .Select(action => exportableCode.IndexOf(action.CodeId))
+                    .ToList();
+
+                if (codeIds.Count == 0)
+                {
+                    continue;
+                }
+
+                // GM keys moments by step, so the editor can't author two at the same one -- but
+                // append rather than assign so a file that somehow has them keeps both actions
+                // instead of silently dropping one.
+                if (asset.MomentCodeIDs.TryGetValue((int)moment.Step, out var existing))
+                {
+                    existing.AddRange(codeIds);
+                }
+                else
+                {
+                    asset.MomentCodeIDs[(int)moment.Step] = codeIds;
+                }
+            }
+
+            writer.WriteMemoryPack(asset);
+        }
+
+        Console.WriteLine(" Done!");
+    }
+
     public static int CurrentElementID = 0;
 
     public static void ExportRooms(BinaryWriter writer, UndertaleData data)
@@ -941,7 +1075,10 @@ public static class GameConverter
                 CreationCodeId = codes.IndexOf(room.CreationCodeId),
                 GravityX = room.GravityX,
                 GravityY = room.GravityY,
-                EnableViews = room.Flags.HasFlag(UndertaleRoom.RoomEntryFlags.EnableViews)
+                EnableViews = room.Flags.HasFlag(UndertaleRoom.RoomEntryFlags.EnableViews),
+                BackgroundColor = room.BackgroundColor,
+                DrawBackgroundColor = room.DrawBackgroundColor,
+                Speed = (int)room.Speed
             };
 
             for (var i = 0; i < 8; i++)
@@ -1470,7 +1607,7 @@ public static class GameConverter
 
             foreach (var point in path.Points)
             {
-                asset.Points.Add(new PathPoint() { x = point.X, y = point.Y, speed = point.Speed});
+                asset.Points.Add(new PathPoint() { x = point.X, y = point.Y, speed = point.Speed });
             }
 
             writer.WriteMemoryPack(asset);
@@ -1542,28 +1679,19 @@ public static class GameConverter
             asset.Name = shader.Name.Content;
             asset.ShaderType = (int)shader.Type;
 
-            /*switch (shader.Type)
-            {
-                case UndertaleShader.ShaderType.GLSL_ES:
-                    asset.VertexSource = shader.GLSL_ES_Vertex.Content;
-                    asset.FragmentSource = shader.GLSL_ES_Fragment.Content;
-                    break;
-                case UndertaleShader.ShaderType.GLSL:
-                    asset.VertexSource = shader.GLSL_Vertex.Content;
-                    asset.FragmentSource = shader.GLSL_Fragment.Content;
-                    break;
-                case UndertaleShader.ShaderType.HLSL9:
-                    asset.VertexSource = shader.HLSL9_Vertex.Content;
-                    asset.FragmentSource = shader.HLSL9_Fragment.Content;
-                    break;
-                default:
-                    // There are other shader types (HLSL11, PSSL, CG_PS3, CG_VITA) but they shouldn't show up
-                    throw new NotImplementedException();
-            }*/
-
+#if BROWSER
+            // WebGL2 needs GLSL ES, not desktop GLSL (e.g. a "#version 120" vertex shader fails to
+            // compile under WebGL2 with "client/version number not supported") -- GameMaker's own
+            // compiler already emits a GLSL ES variant alongside the desktop one for every shader
+            // (it targets HTML5/mobile too), so this is just picking the field already meant for
+            // this platform, not a transpile.
+            asset.VertexSource = shader.GLSL_ES_Vertex.Content;
+            asset.FragmentSource = shader.GLSL_ES_Fragment.Content;
+#else
             // just always use glsl because we use opengl
             asset.VertexSource = shader.GLSL_Vertex.Content;
             asset.FragmentSource = shader.GLSL_Fragment.Content;
+#endif
 
             asset.ShaderAttributes = new string[shader.VertexShaderAttributes.Count];
             for (var i = 0; i < shader.VertexShaderAttributes.Count; i++)
@@ -1586,7 +1714,7 @@ public static class GameConverter
         }
 
         Console.Write($"Exporting animation curves...");
-        
+
         writer.Write(data.AnimationCurves.Count);
         foreach (var animcurve in data.AnimationCurves)
         {
@@ -1605,10 +1733,11 @@ public static class GameConverter
 
                 foreach (var point in channel.Points)
                 {
-                    var pointAsset = new AnimCurvePoint { 
-                        X = point.X, 
-                        Y = point.Value, 
-                        BezierX0 = point.BezierX0, 
+                    var pointAsset = new AnimCurvePoint
+                    {
+                        X = point.X,
+                        Y = point.Value,
+                        BezierX0 = point.BezierX0,
                         BezierY0 = point.BezierY0,
                         BezierX1 = point.BezierX1,
                         BezierY1 = point.BezierY1

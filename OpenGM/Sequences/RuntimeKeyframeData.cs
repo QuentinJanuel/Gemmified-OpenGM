@@ -1,7 +1,7 @@
-﻿using OpenGM.SerializedFiles;
+﻿using OpenGM.Loading;
+using OpenGM.SerializedFiles;
 using OpenGM.VirtualMachine;
 using System.Collections;
-using OpenGM.Loading;
 
 namespace OpenGM.Sequences;
 
@@ -22,7 +22,7 @@ public class RuntimeKeyframeData : GMLObject
 
         if (keyframeData.SequenceIndex != -1)
         {
-	        sequence = GameLoader.Sequences[keyframeData.SequenceIndex];
+            sequence = GameLoader.Sequences[keyframeData.SequenceIndex];
         }
 
         objectIndex = keyframeData.ObjectIndex;
@@ -73,8 +73,8 @@ public class RuntimeKeyframeData : GMLObject
 
     public RuntimeSequence sequence
     {
-	    get => (RuntimeSequence)SelfVariables["objectIndex"].Conv<GMLObject>();
-	    set => SelfVariables["objectIndex"] = value.Conv<GMLObject>();
+        get => (RuntimeSequence)SelfVariables["objectIndex"].Conv<GMLObject>();
+        set => SelfVariables["objectIndex"] = value.Conv<GMLObject>();
     }
 
     public int objectIndex

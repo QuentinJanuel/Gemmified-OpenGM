@@ -1,6 +1,7 @@
 ﻿using MemoryPack;
 
 namespace OpenGM.SerializedFiles;
+
 [MemoryPackable]
 public partial class Background
 {

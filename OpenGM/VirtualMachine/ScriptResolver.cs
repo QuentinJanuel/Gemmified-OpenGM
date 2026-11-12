@@ -7,12 +7,13 @@ using System.Collections;
 using System.Reflection;
 
 namespace OpenGM.VirtualMachine;
+
 public static class ScriptResolver
 {
     public static Dictionary<string, VMScript> ScriptsByName = new();
     public static Dictionary<int, VMScript> ScriptsByIndex = new();
     public static List<VMCode> GlobalInit = new();
-    
+
     public static Dictionary<string, GMLFunctionType> BuiltInFunctions = new();
 
     public static List<string> LoggedStubs = [];
@@ -26,11 +27,12 @@ public static class ScriptResolver
             return;
         }
 
-        GMLFunctionType MakeStubFunction(GMLFunctionType function, string functionName, DebugLog.LogType stubLogType) 
+        GMLFunctionType MakeStubFunction(GMLFunctionType function, string functionName, DebugLog.LogType stubLogType)
         {
             return (object?[] args) =>
             {
-                if (AlwaysLogStubs || !LoggedStubs.Contains(functionName)) {
+                if (AlwaysLogStubs || !LoggedStubs.Contains(functionName))
+                {
                     if (!AlwaysLogStubs)
                     {
                         LoggedStubs.Add(functionName);
@@ -39,7 +41,8 @@ public static class ScriptResolver
                 }
                 return function.Invoke(args);
             };
-        };
+        }
+        ;
 
         var assembly = Assembly.GetExecutingAssembly();
         var methods = assembly.GetTypes()
@@ -144,6 +147,287 @@ public static class ScriptResolver
             Colors = [Color4.White, Color4.White, Color4.White, Color4.White],
             scale = Vector2d.One,
             angle = 0,
+            origin = Vector2.Zero
+        });
+
+        return null;
+    }
+
+    /// <summary>
+    /// Repeats the background across the whole current view rather than drawing it once, with
+    /// (x, y) acting as the tiling offset instead of a position. GM wraps the offset into the first
+    /// tile up and left of the view, then covers the view from there.
+    /// </summary>
+    [GMLFunction("draw_background_tiled", before: "2.0.0.0")]
+    public static object? draw_background_tiled(object?[] args)
+    {
+        var index = args[0].Conv<int>();
+        var x = args[1].Conv<double>();
+        var y = args[2].Conv<double>();
+
+        var background = GameLoader.Backgrounds[index];
+        var sprite = background.Texture;
+
+        if (sprite == null)
+        {
+            return null;
+        }
+
+        var width = sprite.TargetWidth;
+        var height = sprite.TargetHeight;
+
+        if (width <= 0 || height <= 0)
+        {
+            return null;
+        }
+
+        var view = GraphicsManager.ViewArea;
+
+        // Step back to the first tile that can still overlap the view's top-left corner. The double
+        // modulo keeps this right for offsets to the left of / above the view, where a single one
+        // would leave a gap of unfilled background along those edges.
+        var startX = view.X + (((x - view.X) % width) - width) % width;
+        var startY = view.Y + (((y - view.Y) % height) - height) % height;
+
+        for (var drawY = startY; drawY < view.Y + view.W; drawY += height)
+        {
+            for (var drawX = startX; drawX < view.X + view.Z; drawX += width)
+            {
+                CustomWindow.Draw(new GMSpriteJob()
+                {
+                    texture = sprite,
+                    screenPos = new(drawX, drawY),
+                    Colors = [Color4.White, Color4.White, Color4.White, Color4.White],
+                    scale = Vector2d.One,
+                    angle = 0,
+                    origin = Vector2.Zero
+                });
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Helper for the background draw family: resolves the asset's texture, or null if the index or
+    /// the texture is missing. Every one of these returns quietly in that case rather than throwing
+    /// -- a missing background should not take the rest of the Draw event with it.
+    /// </summary>
+    private static SpritePageItem? BackgroundTexture(object? index)
+        => GameLoader.Backgrounds.TryGetValue(index.Conv<int>(), out var bg) ? bg.Texture : null;
+
+    /// <summary>Draws a sub-rectangle of the background at (x, y), unscaled and unblended.</summary>
+    [GMLFunction("draw_background_part", before: "2.0.0.0")]
+    public static object? draw_background_part(object?[] args)
+    {
+        return DrawBackgroundPartExt(args[0], args[1].Conv<int>(), args[2].Conv<int>(),
+            args[3].Conv<int>(), args[4].Conv<int>(), args[5].Conv<double>(), args[6].Conv<double>(),
+            1, 1, 0xFFFFFF, SpriteManager.DrawAlpha);
+    }
+
+    [GMLFunction("draw_background_part_ext", before: "2.0.0.0")]
+    public static object? draw_background_part_ext(object?[] args)
+    {
+        return DrawBackgroundPartExt(args[0], args[1].Conv<int>(), args[2].Conv<int>(),
+            args[3].Conv<int>(), args[4].Conv<int>(), args[5].Conv<double>(), args[6].Conv<double>(),
+            args[7].Conv<double>(), args[8].Conv<double>(), args[9].Conv<int>(), args[10].Conv<double>());
+    }
+
+    private static object? DrawBackgroundPartExt(object? index, int left, int top, int width, int height,
+        double x, double y, double xscale, double yscale, int blend, double alpha)
+    {
+        var sprite = BackgroundTexture(index);
+        if (sprite == null)
+        {
+            return null;
+        }
+
+        var c = blend.ABGRToCol4(alpha);
+        CustomWindow.Draw(new GMSpritePartJob
+        {
+            texture = sprite,
+            screenPos = new Vector2d(x, y),
+            angle = 0,
+            scale = new Vector2d(xscale, yscale),
+            Colors = [c, c, c, c],
+            origin = Vector2.Zero,
+            left = left,
+            top = top,
+            width = width,
+            height = height
+        });
+        return null;
+    }
+
+    /// <summary>
+    /// Stretches the whole background to fill the given rectangle. Note the last two arguments are a
+    /// width and a height, not a second corner.
+    /// </summary>
+    [GMLFunction("draw_background_stretched", before: "2.0.0.0")]
+    public static object? draw_background_stretched(object?[] args)
+        => DrawBackgroundStretchedExt(args[0], args[1].Conv<double>(), args[2].Conv<double>(),
+            args[3].Conv<double>(), args[4].Conv<double>(), 0xFFFFFF, SpriteManager.DrawAlpha);
+
+    [GMLFunction("draw_background_stretched_ext", before: "2.0.0.0")]
+    public static object? draw_background_stretched_ext(object?[] args)
+        => DrawBackgroundStretchedExt(args[0], args[1].Conv<double>(), args[2].Conv<double>(),
+            args[3].Conv<double>(), args[4].Conv<double>(), args[5].Conv<int>(), args[6].Conv<double>());
+
+    private static object? DrawBackgroundStretchedExt(object? index, double x, double y,
+        double w, double h, int blend, double alpha)
+    {
+        var sprite = BackgroundTexture(index);
+        if (sprite == null || sprite.TargetWidth <= 0 || sprite.TargetHeight <= 0)
+        {
+            return null;
+        }
+
+        var c = blend.ABGRToCol4(alpha);
+        CustomWindow.Draw(new GMSpriteJob
+        {
+            texture = sprite,
+            screenPos = new(x, y),
+            Colors = [c, c, c, c],
+            // Stretching is expressed as a scale, so the target size has to be divided back out by
+            // the texture's own size rather than passed through.
+            scale = new Vector2d(w / sprite.TargetWidth, h / sprite.TargetHeight),
+            angle = 0,
+            origin = Vector2.Zero
+        });
+
+        return null;
+    }
+
+    /// <summary>The everything-at-once variant: a sub-rectangle, scaled, rotated, per-corner blended.</summary>
+    [GMLFunction("draw_background_general", before: "2.0.0.0")]
+    public static object? draw_background_general(object?[] args)
+    {
+        var sprite = BackgroundTexture(args[0]);
+        if (sprite == null)
+        {
+            return null;
+        }
+
+        var left = args[1].Conv<int>();
+        var top = args[2].Conv<int>();
+        var width = args[3].Conv<int>();
+        var height = args[4].Conv<int>();
+        var x = args[5].Conv<double>();
+        var y = args[6].Conv<double>();
+        var xscale = args[7].Conv<double>();
+        var yscale = args[8].Conv<double>();
+        var rot = args[9].Conv<double>();
+        var alpha = args[14].Conv<double>();
+
+        // Four corner colours, in GM's order: top-left, top-right, bottom-right, bottom-left.
+        Color4[] colours =
+        [
+            args[10].Conv<int>().ABGRToCol4(alpha),
+            args[11].Conv<int>().ABGRToCol4(alpha),
+            args[12].Conv<int>().ABGRToCol4(alpha),
+            args[13].Conv<int>().ABGRToCol4(alpha),
+        ];
+
+        CustomWindow.Draw(new GMSpritePartJob
+        {
+            texture = sprite,
+            screenPos = new Vector2d(x, y),
+            angle = rot,
+            scale = new Vector2d(xscale, yscale),
+            Colors = colours,
+            origin = Vector2.Zero,
+            left = left,
+            top = top,
+            width = width,
+            height = height
+        });
+        return null;
+    }
+
+    /// <summary>Like draw_background_tiled but scaled and blended.</summary>
+    [GMLFunction("draw_background_tiled_ext", before: "2.0.0.0")]
+    public static object? draw_background_tiled_ext(object?[] args)
+    {
+        var sprite = BackgroundTexture(args[0]);
+        if (sprite == null)
+        {
+            return null;
+        }
+
+        var x = args[1].Conv<double>();
+        var y = args[2].Conv<double>();
+        var xscale = args[3].Conv<double>();
+        var yscale = args[4].Conv<double>();
+        var blend = args[5].Conv<int>();
+        var alpha = args[6].Conv<double>();
+
+        var width = sprite.TargetWidth * xscale;
+        var height = sprite.TargetHeight * yscale;
+        if (width <= 0 || height <= 0)
+        {
+            return null;
+        }
+
+        var view = GraphicsManager.ViewArea;
+        // Same double-modulo wrap draw_background_tiled uses -- a single one leaves a gap along the
+        // top/left edges when the offset is above or left of the view.
+        var startX = view.X + (((x - view.X) % width) - width) % width;
+        var startY = view.Y + (((y - view.Y) % height) - height) % height;
+        var c = blend.ABGRToCol4(alpha);
+
+        for (var drawY = startY; drawY < view.Y + view.W; drawY += height)
+        {
+            for (var drawX = startX; drawX < view.X + view.Z; drawX += width)
+            {
+                CustomWindow.Draw(new GMSpriteJob
+                {
+                    texture = sprite,
+                    screenPos = new(drawX, drawY),
+                    Colors = [c, c, c, c],
+                    scale = new Vector2d(xscale, yscale),
+                    angle = 0,
+                    origin = Vector2.Zero
+                });
+            }
+        }
+
+        return null;
+    }
+
+    [GMLFunction("draw_background_ext", before: "2.0.0.0")]
+    public static object? draw_background_ext(object?[] args)
+    {
+        var index = args[0].Conv<int>();
+        var x = args[1].Conv<double>();
+        var y = args[2].Conv<double>();
+        var xscale = args[3].Conv<double>();
+        var yscale = args[4].Conv<double>();
+        var rot = args[5].Conv<double>();
+        var blend = args[6].Conv<int>();
+        var alpha = args[7].Conv<double>();
+
+        var background = GameLoader.Backgrounds[index];
+
+        // TODO : handle tiling
+        // TODO : handle foreground
+        // TODO : handle speed
+
+        var sprite = background.Texture;
+
+        if (sprite == null)
+        {
+            return null;
+        }
+
+        var c = blend.ABGRToCol4(alpha);
+
+        CustomWindow.Draw(new GMSpriteJob()
+        {
+            texture = sprite,
+            screenPos = new(x, y),
+            Colors = [c, c, c, c],
+            scale = new Vector2d(xscale, yscale),
+            angle = rot,
             origin = Vector2.Zero
         });
 

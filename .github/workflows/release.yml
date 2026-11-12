@@ -1,0 +1,81 @@
+name: Release
+
+# Started by hand (Actions > Release > Run workflow), from gemmified only. It works out the next
+# version from the live update feed, builds the plugin as that version, and publishes it:
+#   - the zip goes to https://gemmified-opengm.dappermink.me/<version>/opengm-<version>.zip,
+#   - latest.json is replaced to list only that version (scripts/publish-feed.mjs),
+#   - the GitHub release, and with it the v<version> tag, is created on the commit being built,
+#   - last, the earlier versions' objects are deleted (scripts/prune-old-versions.mjs).
+# The Cloudflare secrets live in the `release` environment, which only gemmified can deploy to.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the current version to increase
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      version:
+        description: Or an exact version, e.g. 1.0.0 (overrides the choice above)
+        type: string
+        default: ""
+
+run-name: Release ${{ inputs.version || inputs.bump }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/gemmified'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write # the GitHub release and its tag
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      GH_TOKEN: ${{ github.token }}
+      FEED: https://gemmified-opengm.dappermink.me
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Work out the version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+          EXACT: ${{ inputs.version }}
+        run: |
+          current=$(curl -fsSL "$FEED/latest.json?run=$GITHUB_RUN_ID" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).latest')
+          version=$(node scripts/next-version.mjs "$current" "$BUMP" "$EXACT")
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            echo "::error::the tag v$version already exists"; exit 1
+          fi
+          echo "current $current, releasing $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/build
+        with:
+          version: ${{ steps.version.outputs.version }}
+
+      - name: Publish
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          (cd plugin && zip -qr "../opengm-$VERSION.zip" .)
+          pnpm dlx wrangler@4.120.0 r2 object put "gemmified-opengm/$VERSION/opengm-$VERSION.zip" \
+            --file "opengm-$VERSION.zip" --content-type application/zip --remote
+          node scripts/publish-feed.mjs gemmified-opengm "$FEED" "opengm-$VERSION.zip"
+          gh release create "v$VERSION" "opengm-$VERSION.zip" \
+            --target "$GITHUB_SHA" --title "v$VERSION" --notes ""
+
+      - name: Delete the superseded builds
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: node scripts/prune-old-versions.mjs gemmified-opengm "$VERSION"

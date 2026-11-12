@@ -22,7 +22,17 @@
             return false; // TODO : implement
         }
 
-        // gamepad_get_description
+        [GMLFunction("gamepad_get_description", GMLFunctionFlags.Stub)]
+        public static object gamepad_get_description(object?[] args)
+        {
+            var device = args[0].Conv<int>();
+
+            // Gamepads aren't wired up at all yet (gamepad_is_connected is false for every slot), so
+            // there's no real name to give -- but a control-config menu asking for one shouldn't die
+            // on an unresolved call for it.
+            return "";
+        }
+
         // gamepad_get_button_threshold
         // gamepad_set_button_threshold
         // gamepad_get_axis_deadzone

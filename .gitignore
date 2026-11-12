@@ -394,3 +394,12 @@ FodyWeavers.xsd
 *.sln.iml
 .idea
 OpenGM/Properties/launchSettings.json
+
+# macOS
+.DS_Store
+
+# build output
+/node_modules/
+/dist/
+/plugin/
+/*.zip

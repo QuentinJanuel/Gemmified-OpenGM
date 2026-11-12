@@ -28,7 +28,15 @@ float CalcFogFactor(vec4 pos)
 	if (gm_VS_FogEnabled)
 	{
 		vec4 viewpos = gm_Matrices[MATRIX_WORLD_VIEW] * pos;
-		float fogfactor = ((viewpos.z - gm_FogStart) * gm_RcpFogRange);
+		// -viewpos.z, not viewpos.z: gm_FogStart/gm_RcpFogRange are distances IN FRONT OF the
+		// camera, and this view matrix is a GL one (BuildViewMatrices' LookAt puts the eye at
+		// z = +16000 looking down -z), so everything visible has negative view-space z. GM's own
+		// D3D view matrix is left-handed and gets the same distance as a positive number.
+		// Unnegated, ordinary 2D geometry sits at view z = -16000 and every fog factor came out
+		// hugely negative, i.e. clamped to zero: gpu_set_fog did nothing at all, whatever a game
+		// asked for. tijit engine 2 tints its whole tile mesh by setting fog to (-1, 1) so that
+		// everything is fully fogged, which is only a trick that works because of that 16000.
+		float fogfactor = ((-viewpos.z - gm_FogStart) * gm_RcpFogRange);
 		return fogfactor;
 	}
 	else

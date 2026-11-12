@@ -24,11 +24,86 @@ public class InputHandler
     public static bool[] KeyPressed = new bool[256];
     public static bool[] KeyReleased = new bool[256];
 
+    /// <summary>
+    /// What each physical key reports as -- keyboard_set_map's table, identity until a game changes
+    /// it. Indexed by the virtual key the player presses; the value is the one the game will see.
+    /// </summary>
+    /// <remarks>
+    /// A value below 2 means discard the press: vk_nokey and vk_anykey are not real keys but
+    /// questions answered by sweeping this array (see keyboard_check's case 0/1), so a press written
+    /// into their slots would make "no key is down" report that one is.
+    /// </remarks>
+    public static byte[] KeyMap = IdentityKeyMap();
+
+    /// <summary>Raw key states for one frame, and the same frame folded through KeyMap. Reused
+    /// rather than allocated every frame -- this runs once per step.</summary>
+    private static readonly bool[] RawKeys = new bool[256];
+    private static readonly bool[] MappedKeys = new bool[256];
+
+    /// <summary>
+    /// Folds one frame of real key states through <see cref="KeyMap"/>, writing what the game will
+    /// see into <paramref name="mapped"/>.
+    /// </summary>
+    /// <remarks>
+    /// Separate from reading the keyboard, and pure, because this is where a rebind is either right
+    /// or silently wrong. Two things make it more than an array copy: the mapping is many-to-one, so
+    /// two keys reporting as the same one must OR rather than overwrite; and a key mapped below vk 2
+    /// is discarded, because vk_nokey and vk_anykey are questions answered by sweeping this array
+    /// rather than slots in it, so a press stored there would make "no key is down" report one.
+    ///
+    /// Slots 0 and 1 are left alone for that reason -- they are maintained separately from whether
+    /// any key is physically down.
+    /// </remarks>
+    public static void ApplyKeyMap(bool[] raw, bool[] mapped)
+    {
+        for (var i = 2; i < 256; i++)
+        {
+            mapped[i] = false;
+        }
+
+        for (var i = 2; i < 256; i++)
+        {
+            if (!raw[i])
+            {
+                continue;
+            }
+
+            var to = KeyMap[i];
+            if (to < 2)
+            {
+                continue;
+            }
+
+            mapped[to] = true;
+        }
+    }
+
+    public static byte[] IdentityKeyMap()
+    {
+        var map = new byte[256];
+        for (var i = 0; i < map.Length; i++)
+        {
+            map[i] = (byte)i;
+        }
+        return map;
+    }
+
+    // Backs the keyboard_key/keyboard_lastkey built-in variables (VariableResolver.cs). Matches
+    // real GM8 semantics (confirmed against OpenGMK's Input::button_press/button_release):
+    // keyboard_key is set to whichever key was just pressed and reset to vk_nokey (0) once THAT
+    // specific key is released; keyboard_lastkey is set alongside it on press but never reset on
+    // release, so it keeps reporting the most recently pressed key even after it's back up.
+    public static int KeyboardKey = 0;
+    public static int KeyboardLastKey = 0;
+
     public static bool[] MouseDown = new bool[5];
     public static bool[] MousePressed = new bool[5];
     public static bool[] MouseReleased = new bool[5];
 
     public static Vector2 MousePos = new();
+
+    public static bool MouseWheelUp;
+    public static bool MouseWheelDown;
 
     public static string KeyboardString = "";
 
@@ -48,6 +123,16 @@ public class InputHandler
 
         MousePos.X = state.X;
         MousePos.Y = state.Y;
+
+        // Real OpenTK's ScrollDelta is already a per-frame delta on native (auto-reset by its own
+        // event pump); the wasm shim's version reads from a JS-side accumulator that only resets
+        // via an explicit clear, so that has to happen here, once per frame, right after reading it.
+        var scrollY = state.ScrollDelta.Y;
+        MouseWheelUp = scrollY > 0;
+        MouseWheelDown = scrollY < 0;
+#if BROWSER
+        BrowserInput.ClearWheelDelta();
+#endif
     }
 
     /// <summary>
@@ -88,6 +173,18 @@ public class InputHandler
             0x79 => [Keys.F10],
             0x7A => [Keys.F11],
             0x7B => [Keys.F12],
+            0x7C => [Keys.F13],
+            0x7D => [Keys.F14],
+            0x7E => [Keys.F15],
+            0x7F => [Keys.F16],
+            0x80 => [Keys.F17],
+            0x81 => [Keys.F18],
+            0x82 => [Keys.F19],
+            0x83 => [Keys.F20],
+            0x84 => [Keys.F21],
+            0x85 => [Keys.F22],
+            0x86 => [Keys.F23],
+            0x87 => [Keys.F24],
 
             0xA0 => [Keys.LeftShift],
             0xA1 => [Keys.RightShift],
@@ -229,9 +326,28 @@ public class InputHandler
         CalculateKey(0, !state.IsAnyKeyDown); // vk_nokey
         CalculateKey(1, state.IsAnyKeyDown); // vk_anykey
 
+        // Read every key's real state first, then fold the whole frame through KeyMap in one go --
+        // see ApplyKeyMap for why that cannot be done while sweeping.
         for (var i = 2; i < 256; i++)
         {
-            CalculateKey(i, CustomWindow.Instance.IsFocused && Convert(i).Any(state.IsKeyDown));
+            RawKeys[i] = CustomWindow.Instance.IsFocused && Convert(i).Any(state.IsKeyDown);
+        }
+
+        ApplyKeyMap(RawKeys, MappedKeys);
+
+        for (var i = 2; i < 256; i++)
+        {
+            CalculateKey(i, MappedKeys[i]);
+
+            if (KeyPressed[i])
+            {
+                KeyboardKey = i;
+                KeyboardLastKey = i;
+            }
+            else if (KeyReleased[i] && KeyboardKey == i)
+            {
+                KeyboardKey = 0;
+            }
         }
 
         // TODO: account for caps lock?
@@ -300,12 +416,12 @@ public class InputHandler
                 foreach (var element in layer.ElementsToDraw)
                 {
                     var str = $"     - {element.GetType().Name} ({element.instanceId})";
-                    if (element is GMSprite sprite) 
+                    if (element is GMSprite sprite)
                     {
 
                         str += $" [{sprite.X}, {sprite.Y}]";
                     }
-                    else if (element is GMBackground bg) 
+                    else if (element is GMBackground bg)
                     {
 
                         str += $" Index:{bg.Element.Index} Frame:{bg.FrameIndex}";

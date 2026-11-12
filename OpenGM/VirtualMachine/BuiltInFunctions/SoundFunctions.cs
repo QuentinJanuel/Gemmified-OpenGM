@@ -1,7 +1,7 @@
 ﻿using OpenGM.IO;
 using OpenTK.Audio.OpenAL;
 using OpenTK.Mathematics;
-using StbVorbisSharp;
+using System.Runtime.InteropServices;
 
 namespace OpenGM.VirtualMachine.BuiltInFunctions
 {
@@ -20,7 +20,16 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return null;
         }
 
-        // audio_listener_velocity
+        [GMLFunction("audio_listener_velocity")]
+        public static object? audio_listener_velocity(object?[] args)
+        {
+            var vx = args[0].Conv<float>();
+            var vy = args[1].Conv<float>();
+            var vz = args[2].Conv<float>();
+
+            AudioManager.Listener.Velocity = new Vector3(vx, vy, vz);
+            return null;
+        }
 
         [GMLFunction("audio_listener_orientation")]
         public static object? audio_listener_orientation(object?[] args)
@@ -155,7 +164,47 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return AudioManager.PlaySoundOnEmitter(AudioManager.GetAudioEmitter(emitter), sound, priority, loop, gain, offset, pitch, listener_mask);
         }
 
-        // audio_play_sound_at
+        // Convenience wrapper combining a one-shot emitter (position + falloff) with playback, so a
+        // game doesn't have to manually audio_emitter_create/position/free just to play one
+        // positional sound. Falloff is applied to a throwaway emitter, not AudioManager's normal
+        // reusable emitter pool, since the caller never gets a handle to free it themselves.
+        [GMLFunction("audio_play_sound_at")]
+        public static object? audio_play_sound_at(object?[] args)
+        {
+            var index = args[0].Conv<int>();
+            var x = args[1].Conv<float>();
+            var y = args[2].Conv<float>();
+            var z = args[3].Conv<float>();
+            var falloffRef = args[4].Conv<float>();
+            var falloffMax = args[5].Conv<float>();
+            var falloffFactor = args[6].Conv<float>();
+            var loop = args[7].Conv<bool>();
+            var priority = args[8].Conv<double>();
+
+            var asset = AudioManager.GetAudioAsset(index);
+            var gain = asset?.Gain ?? 1;
+            var offset = asset?.Offset ?? 0;
+            var pitch = asset?.Pitch ?? 1;
+            var listenerMask = 0;
+
+            if (args.Length > 9)
+                gain = args[9].Conv<double>();
+            if (args.Length > 10)
+                offset = args[10].Conv<double>();
+            if (args.Length > 11)
+                pitch = args[11].Conv<double>();
+            if (args.Length > 12)
+                listenerMask = args[12].Conv<int>();
+
+            var emitterId = AudioManager.AudioEmitterCreate();
+            var emitter = AudioManager.GetAudioEmitter(emitterId);
+            emitter.Position = new Vector3(x, y, z);
+            emitter.FalloffRef = falloffRef;
+            emitter.FalloffMax = falloffMax;
+            emitter.FalloffFac = falloffFactor;
+
+            return AudioManager.PlaySoundOnEmitter(emitter, index, priority, loop, gain, offset, pitch, listenerMask);
+        }
 
         [GMLFunction("audio_falloff_set_model")]
         public static object? audio_falloff_set_model(object?[] args)
@@ -247,8 +296,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             {
                 foreach (var item in AudioManager.GetAudioInstances(index))
                 {
-                    AL.SourcePlay(item.Source);
-                    AudioManager.CheckALError();
+                    ResumeIfNotPlaying(item);
                 }
             }
             else
@@ -256,8 +304,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
                 var instance = AudioManager.GetAudioInstance(index);
                 if (instance != null)
                 {
-                    AL.SourcePlay(instance.Source);
-                    AudioManager.CheckALError();
+                    ResumeIfNotPlaying(instance);
                 }
             }
 
@@ -281,11 +328,43 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         {
             foreach (var item in AudioManager.GetAllAudioInstances())
             {
-                AL.SourcePlay(item.Source);
-                AudioManager.CheckALError();
+                ResumeIfNotPlaying(item);
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// A source that's merely paused (audio_pause_sound) is still tracked as a live
+        /// AudioInstance -- only a genuinely stopped/finished source gets reclaimed by
+        /// AudioManager.Update(). "Instance exists" therefore isn't enough to tell playing and
+        /// paused apart; both audio_is_playing and audio_is_paused need the real source state.
+        /// </summary>
+        private static bool InstanceHasState(AudioInstance instance, ALSourceState wanted)
+        {
+            var state = (ALSourceState)AL.GetSource(instance.Source, ALGetSourcei.SourceState);
+            AudioManager.CheckALError();
+            return state == wanted;
+        }
+
+        /// <summary>
+        /// Real GM's audio_resume_sound/audio_resume_all docs: "If the sound is already playing
+        /// this function does nothing." AL.SourcePlay on an already-playing source restarts it from
+        /// the beginning instead (both per the OpenAL spec and this project's own webaudio.js
+        /// backend, which always tears down and starts a fresh node) -- guarding here matches real
+        /// GM's no-op-if-already-playing behavior instead of restarting a sound that was never
+        /// actually paused (e.g. calling audio_resume_sound defensively/unconditionally, which real
+        /// games do -- see YoYoYo_Engine's restart-room key handler).
+        /// </summary>
+        private static void ResumeIfNotPlaying(AudioInstance instance)
+        {
+            if (InstanceHasState(instance, ALSourceState.Playing))
+            {
+                return;
+            }
+
+            AL.SourcePlay(instance.Source);
+            AudioManager.CheckALError();
         }
 
         [GMLFunction("audio_is_playing")]
@@ -295,28 +374,29 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
 
             if (index < GMConstants.BASE_SOUND_INDEX)
             {
-                // playing = exists for us, so anything in here means something is playing
-                foreach (var item in AudioManager.GetAudioInstances(index))
-                {
-                    if (item != null)
-                    {
-                        return true;
-                    }
-                }
-
-                return false;
+                return AudioManager.GetAudioInstances(index).Any(item => InstanceHasState(item, ALSourceState.Playing));
             }
             else
             {
                 var instance = AudioManager.GetAudioInstance(index);
-                return instance != null;
+                return instance != null && InstanceHasState(instance, ALSourceState.Playing);
             }
         }
 
         [GMLFunction("audio_is_paused")]
         public static object? audio_is_paused(object?[] args)
         {
-            return !(bool?)audio_is_playing(args);
+            var index = args[0].Conv<int>();
+
+            if (index < GMConstants.BASE_SOUND_INDEX)
+            {
+                return AudioManager.GetAudioInstances(index).Any(item => InstanceHasState(item, ALSourceState.Paused));
+            }
+            else
+            {
+                var instance = AudioManager.GetAudioInstance(index);
+                return instance != null && InstanceHasState(instance, ALSourceState.Paused);
+            }
         }
 
         [GMLFunction("audio_exists")]
@@ -334,9 +414,30 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             }
         }
 
-        // audio_system_is_available
-        // audio_sound_is_playable
-        // audio_master_gain
+        // This engine's audio system is either fully initialized (AudioManager.Init, called from
+        // Entry.LoadGame before any GML runs) or the game hasn't started yet -- there's no
+        // "hardware unavailable" failure mode to report, unlike real DirectSound/XAudio2 hardware
+        // enumeration.
+        [GMLFunction("audio_system_is_available")]
+        public static object? audio_system_is_available(object?[] args) => true;
+
+        [GMLFunction("audio_sound_is_playable")]
+        public static object? audio_sound_is_playable(object?[] args)
+        {
+            var index = args[0].Conv<int>();
+            return AudioManager.GetAudioAsset(index) != null;
+        }
+
+        // Older, single-argument predecessor of audio_set_master_gain(listener_index, gain) below
+        // -- same underlying global gain, no per-listener index.
+        [GMLFunction("audio_master_gain")]
+        public static object? audio_master_gain(object?[] args)
+        {
+            var gain = Math.Max(0, args[0].Conv<double>());
+            AL.Listener(ALListenerf.Gain, (float)gain);
+            AudioManager.CheckALError();
+            return null;
+        }
 
         [GMLFunction("audio_emitter_exists")]
         public static object? audio_emitter_exists(object?[] args)
@@ -346,7 +447,11 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return AudioManager.AudioEmitterExists(id);
         }
 
-        // audio_get_type
+        // Every sound resource is loaded through the same AudioManager path regardless of whether a
+        // game authored it for the legacy sound_* system or the modern audio_* one -- there's no
+        // real distinction to report, so this always answers audio_new_system (1).
+        [GMLFunction("audio_get_type")]
+        public static object? audio_get_type(object?[] args) => 1;
 
         [GMLFunction("audio_emitter_gain")]
         public static object? audio_emitter_gain(object?[] args)
@@ -449,7 +554,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
                     return null;
                 }
 
-                AudioManager.ChangeGain(soundAsset.Source, volume, time);
+                AudioManager.ChangeGain(soundAsset, volume, time);
             }
             else
             {
@@ -458,7 +563,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
 
                 foreach (var item in AudioManager.GetAudioInstances(index))
                 {
-                    AudioManager.ChangeGain(item.Source, volume, time);
+                    AudioManager.ChangeGain(item, volume, time);
                 }
             }
 
@@ -504,7 +609,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         public static object? audio_stop_all(object?[] args)
         {
             AudioManager.StopAllAudio();
-            return null;
+            return 0; // "returns nothing" is 0 in GameMaker, not undefined -- see move_towards_point
         }
 
         [GMLFunction("audio_sound_length")]
@@ -547,7 +652,13 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return null;
         }
 
-        // audio_get_master_gain
+        [GMLFunction("audio_get_master_gain")]
+        public static object? audio_get_master_gain(object?[] args)
+        {
+            AL.GetListener(ALListenerf.Gain, out var gain);
+            AudioManager.CheckALError();
+            return (double)gain;
+        }
 
         [GMLFunction("audio_sound_get_gain")]
         public static object? audio_sound_get_gain(object?[] args)
@@ -671,7 +782,12 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return true;
         }
 
-        // audio_group_unload
+        [GMLFunction("audio_group_unload", GMLFunctionFlags.Stub)]
+        public static object? audio_group_unload(object?[] args)
+        {
+            // TODO : actually implement this properly? DELTARUNITY doesnt use audio groups or any GM storage files (yet?)
+            return true;
+        }
 
         [GMLFunction("audio_group_is_loaded", GMLFunctionFlags.Stub)]
         public static object audio_group_is_loaded(object?[] args)
@@ -686,8 +802,17 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return 100;
         }
 
-        // audio_group_name
-        // audio_group_stop_all
+        // Every group is treated as always-loaded (see audio_group_load's own TODO), so there's no
+        // real per-group name registry -- "group<N>" is a stable, distinguishable placeholder.
+        [GMLFunction("audio_group_name", GMLFunctionFlags.Stub)]
+        public static object? audio_group_name(object?[] args) => $"group{args[0].Conv<int>()}";
+
+        [GMLFunction("audio_group_stop_all", GMLFunctionFlags.Stub)]
+        public static object? audio_group_stop_all(object?[] args)
+        {
+            // TODO : actually implement this properly once audio groups track their own sounds
+            return null;
+        }
 
         [GMLFunction("audio_group_set_gain", GMLFunctionFlags.Stub)]
         public static object? audio_group_set_gain(object?[] args)
@@ -696,11 +821,96 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return null;
         }
 
-        // audio_create_buffer_sound
-        // audio_free_buffer_sound
-        // audio_create_play_queue
-        // audio_free_play_queue
-        // audio_queue_sound
+        /// <summary>
+        /// Converts a slice of a GML buffer's raw bytes (already-decoded PCM, unlike sound_add/
+        /// LoadSounds which decode a compressed file format) into interleaved float samples, per
+        /// buffer_get_type's own encoding -- audio_create_buffer_sound's own "format" argument.
+        /// </summary>
+        private static float[] BufferBytesToFloatSamples(byte[] data, int byteOffset, int byteLength, BufferDataType format)
+        {
+            var span = data.AsSpan(byteOffset, byteLength);
+            switch (format)
+            {
+                case BufferDataType.buffer_u8:
+                    return [.. span.ToArray().Select(b => (b / 255f * 2) - 1)];
+                case BufferDataType.buffer_s8:
+                    return [.. MemoryMarshal.Cast<byte, sbyte>(span).ToArray().Select(b => b / 128f)];
+                case BufferDataType.buffer_u16:
+                    return [.. MemoryMarshal.Cast<byte, ushort>(span).ToArray().Select(v => (v / 65535f * 2) - 1)];
+                case BufferDataType.buffer_s16:
+                    return [.. MemoryMarshal.Cast<byte, short>(span).ToArray().Select(v => v / 32768f)];
+                case BufferDataType.buffer_f32:
+                    return MemoryMarshal.Cast<byte, float>(span).ToArray();
+                default:
+                    throw new NotImplementedException($"audio_create_buffer_sound doesn't support buffer format {format}");
+            }
+        }
+
+        [GMLFunction("audio_create_buffer_sound")]
+        public static object? audio_create_buffer_sound(object?[] args)
+        {
+            var bufferIndex = args[0].Conv<int>();
+            var format = (BufferDataType)args[1].Conv<int>();
+            var rate = args[2].Conv<int>();
+            var offset = args[3].Conv<int>();
+            var length = args[4].Conv<int>();
+            var channels = args[5].Conv<int>();
+
+            var buffer = BufferManager.Buffers[bufferIndex];
+            var data = BufferBytesToFloatSamples(buffer.Data, offset, length, format);
+
+            var alBuffer = AL.GenBuffer();
+            AudioManager.CheckALError();
+            AL.BufferData(alBuffer, channels == 2 ? ALFormat.StereoFloat32Ext : ALFormat.MonoFloat32Ext, data, rate);
+            AudioManager.CheckALError();
+
+            return AudioManager.RegisterAudioClip(new AudioAsset
+            {
+                Name = $"buffer_sound_{bufferIndex}",
+                Clip = alBuffer,
+                Gain = 1,
+                Pitch = 1,
+                Offset = 0,
+            });
+        }
+
+        [GMLFunction("audio_free_buffer_sound")]
+        public static object? audio_free_buffer_sound(object?[] args)
+        {
+            var index = args[0].Conv<int>();
+            AudioManager.UnregisterAudio(index);
+            return null;
+        }
+
+        // -- audio_*_play_queue -------------------------------------------------------------
+        //
+        // A queue of sound indices played back-to-back, one at a time -- AudioManager.Update()
+        // (already polled once per frame to reclaim finished sources) additionally checks each
+        // live queue's current instance and starts the next queued sound once it stops.
+
+        [GMLFunction("audio_create_play_queue")]
+        public static object? audio_create_play_queue(object?[] args)
+        {
+            var bus = args.Length > 0 ? args[0].Conv<int>() : 0;
+            return AudioManager.CreatePlayQueue(bus);
+        }
+
+        [GMLFunction("audio_free_play_queue")]
+        public static object? audio_free_play_queue(object?[] args)
+        {
+            var queue = args[0].Conv<int>();
+            AudioManager.FreePlayQueue(queue);
+            return null;
+        }
+
+        [GMLFunction("audio_queue_sound")]
+        public static object? audio_queue_sound(object?[] args)
+        {
+            var queue = args[0].Conv<int>();
+            var sound = args[1].Conv<int>();
+            var offset = args.Length > 2 ? args[2].Conv<double>() : 0;
+            return AudioManager.QueueSound(queue, sound, offset);
+        }
 
         public static Dictionary<string, RecordingInfo> Recorders = new();
 
@@ -744,8 +954,25 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return Recorders.Values.ToList().IndexOf(info);
         }
 
-        // audio_stop_recording
-        // audio_get_recorder_count
+        [GMLFunction("audio_stop_recording")]
+        public static object? audio_stop_recording(object?[] args)
+        {
+            var index = args[0].Conv<int>();
+            var recorders = Recorders.Values.ToList();
+            if (index < 0 || index >= recorders.Count)
+            {
+                return null;
+            }
+
+            var info = recorders[index];
+            if (info.Recording)
+            {
+                ALC.CaptureStop(info.Device);
+                AudioManager.CheckALCError();
+                info.Recording = false;
+            }
+            return null;
+        }
 
         [GMLFunction("audio_get_recorder_count")]
         public static object? audio_get_recorder_count(object?[] args)
@@ -769,36 +996,236 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return dsmap;
         }
 
-        // audio_sound_get_listener_mask
-        // audio_sound_set_listener_mask
-        // audio_emitter_get_listener_mask
-        // audio_emitter_set_listener_mask
-        // audio_get_listener_mask
-        // audio_set_listener_mask
-        // audio_get_listener_info
+        // -- listener masks (GMS2's local-multiplayer/split-screen audio system) -----------------
+        //
+        // This engine only ever has one implicit listener (audio_get_listener_count is always 0 --
+        // no separate listener-object tracking exists to route different sounds to different
+        // listeners), so a "mask" has no real routing effect anywhere -- these are plain bookkeeping
+        // stores/getters, matching whatever a game last set, so code that reads back its own mask
+        // values doesn't see stale/wrong data even though nothing actually filters on them.
+
+        private static readonly Dictionary<int, int> _soundListenerMasks = new();
+        private static readonly Dictionary<int, int> _emitterListenerMasks = new();
+        private static int _globalListenerMask = -1; // -1 = every listener, matches audio_lm_all's real value
+
+        [GMLFunction("audio_sound_get_listener_mask")]
+        public static object? audio_sound_get_listener_mask(object?[] args) =>
+            _soundListenerMasks.GetValueOrDefault(args[0].Conv<int>(), -1);
+
+        [GMLFunction("audio_sound_set_listener_mask")]
+        public static object? audio_sound_set_listener_mask(object?[] args)
+        {
+            _soundListenerMasks[args[0].Conv<int>()] = args[1].Conv<int>();
+            return null;
+        }
+
+        [GMLFunction("audio_emitter_get_listener_mask")]
+        public static object? audio_emitter_get_listener_mask(object?[] args) =>
+            _emitterListenerMasks.GetValueOrDefault(args[0].Conv<int>(), -1);
+
+        [GMLFunction("audio_emitter_set_listener_mask")]
+        public static object? audio_emitter_set_listener_mask(object?[] args)
+        {
+            _emitterListenerMasks[args[0].Conv<int>()] = args[1].Conv<int>();
+            return null;
+        }
+
+        [GMLFunction("audio_get_listener_mask")]
+        public static object? audio_get_listener_mask(object?[] args) => _globalListenerMask;
+
+        [GMLFunction("audio_set_listener_mask")]
+        public static object? audio_set_listener_mask(object?[] args)
+        {
+            _globalListenerMask = args[0].Conv<int>();
+            return null;
+        }
+
+        [GMLFunction("audio_get_listener_info")]
+        public static object? audio_get_listener_info(object?[] args)
+        {
+            var index = args[0].Conv<int>();
+
+            var dsmap = DataStructuresFunctions.ds_map_create();
+            DataStructuresFunctions.ds_map_add([dsmap, "index", index]);
+            DataStructuresFunctions.ds_map_add([dsmap, "flags", _globalListenerMask]);
+            DataStructuresFunctions.ds_map_add([dsmap, "x", AudioManager.Listener.Position.X]);
+            DataStructuresFunctions.ds_map_add([dsmap, "y", AudioManager.Listener.Position.Y]);
+            DataStructuresFunctions.ds_map_add([dsmap, "z", AudioManager.Listener.Position.Z]);
+            return dsmap;
+        }
 
         [GMLFunction("audio_get_listener_count", GMLFunctionFlags.Stub)]
         public static object? audio_get_listener_count(object?[] args)
         {
             return 0;
         }
-        
-        // audio_create_sync_group
-        // audio_destroy_sync_group
-        // audio_play_in_sync_group
-        // audio_start_sync_group
-        // audio_pause_sync_group
-        // audio_resume_sync_group
-        // audio_stop_sync_group
-        // audio_sync_group_get_track_pos
-        // audio_sync_group_debug
-        // audio_sync_group_is_playing
+
+        // -- audio_*_sync_group -------------------------------------------------------------
+        //
+        // Multiple tracks meant to stay locked together (e.g. layered music stems) -- staged via
+        // audio_play_in_sync_group, then actually started back-to-back (in a tight loop, the
+        // closest either this engine or real OpenAL's own source API can get to a hardware-exact
+        // simultaneous start -- Web Audio's AudioBufferSourceNode.start(when) could schedule a
+        // precise future time, but this engine's AL shim doesn't expose per-call scheduling, and
+        // native has no such primitive at all) by audio_start_sync_group.
+
+        private class SyncGroup
+        {
+            public bool Loop;
+            public List<int> PendingSounds = new();
+            public List<int> InstanceIds = new();
+        }
+
+        private static readonly Dictionary<int, SyncGroup> _syncGroups = new();
+        private static int _nextSyncGroup = 1;
+
+        [GMLFunction("audio_create_sync_group")]
+        public static object? audio_create_sync_group(object?[] args)
+        {
+            var loop = args.Length > 0 && args[0].Conv<bool>();
+            var id = _nextSyncGroup++;
+            _syncGroups[id] = new SyncGroup { Loop = loop };
+            return id;
+        }
+
+        [GMLFunction("audio_destroy_sync_group")]
+        public static object? audio_destroy_sync_group(object?[] args)
+        {
+            var group = args[0].Conv<int>();
+            if (_syncGroups.Remove(group, out var g))
+            {
+                foreach (var instanceId in g.InstanceIds)
+                {
+                    var instance = AudioManager.GetAudioInstance(instanceId);
+                    if (instance != null)
+                    {
+                        AL.SourceStop(instance.Source);
+                    }
+                }
+            }
+            return null;
+        }
+
+        [GMLFunction("audio_play_in_sync_group")]
+        public static object? audio_play_in_sync_group(object?[] args)
+        {
+            var group = args[0].Conv<int>();
+            var sound = args[1].Conv<int>();
+            if (_syncGroups.TryGetValue(group, out var g))
+            {
+                g.PendingSounds.Add(sound);
+            }
+            return null;
+        }
+
+        [GMLFunction("audio_start_sync_group")]
+        public static object? audio_start_sync_group(object?[] args)
+        {
+            var group = args[0].Conv<int>();
+            if (!_syncGroups.TryGetValue(group, out var g))
+            {
+                return null;
+            }
+
+            foreach (var sound in g.PendingSounds)
+            {
+                var asset = AudioManager.GetAudioAsset(sound);
+                var instanceId = AudioManager.audio_play_sound(sound, 0, g.Loop, asset?.Gain ?? 1, asset?.Offset ?? 0, asset?.Pitch ?? 1);
+                g.InstanceIds.Add(instanceId);
+            }
+            g.PendingSounds.Clear();
+            return null;
+        }
+
+        [GMLFunction("audio_pause_sync_group")]
+        public static object? audio_pause_sync_group(object?[] args)
+        {
+            var group = args[0].Conv<int>();
+            if (_syncGroups.TryGetValue(group, out var g))
+            {
+                foreach (var instanceId in g.InstanceIds)
+                {
+                    var instance = AudioManager.GetAudioInstance(instanceId);
+                    if (instance != null)
+                        AL.SourcePause(instance.Source);
+                }
+            }
+            return null;
+        }
+
+        [GMLFunction("audio_resume_sync_group")]
+        public static object? audio_resume_sync_group(object?[] args)
+        {
+            var group = args[0].Conv<int>();
+            if (_syncGroups.TryGetValue(group, out var g))
+            {
+                foreach (var instanceId in g.InstanceIds)
+                {
+                    var instance = AudioManager.GetAudioInstance(instanceId);
+                    if (instance != null)
+                        AL.SourcePlay(instance.Source);
+                }
+            }
+            return null;
+        }
+
+        [GMLFunction("audio_stop_sync_group")]
+        public static object? audio_stop_sync_group(object?[] args)
+        {
+            var group = args[0].Conv<int>();
+            if (_syncGroups.TryGetValue(group, out var g))
+            {
+                foreach (var instanceId in g.InstanceIds)
+                {
+                    var instance = AudioManager.GetAudioInstance(instanceId);
+                    if (instance != null)
+                        AL.SourceStop(instance.Source);
+                }
+                g.InstanceIds.Clear();
+            }
+            return null;
+        }
+
+        [GMLFunction("audio_sync_group_get_track_pos")]
+        public static object? audio_sync_group_get_track_pos(object?[] args)
+        {
+            var group = args[0].Conv<int>();
+            if (_syncGroups.TryGetValue(group, out var g) && g.InstanceIds.Count > 0)
+            {
+                var instance = AudioManager.GetAudioInstance(g.InstanceIds[0]);
+                if (instance != null)
+                {
+                    var offset = AL.GetSource(instance.Source, ALSourcef.SecOffset);
+                    AudioManager.CheckALError();
+                    return (double)offset;
+                }
+            }
+            return 0d;
+        }
+
+        [GMLFunction("audio_sync_group_debug", GMLFunctionFlags.Stub)]
+        public static object? audio_sync_group_debug(object?[] args) => null;
+
+        [GMLFunction("audio_sync_group_is_playing")]
+        public static object? audio_sync_group_is_playing(object?[] args)
+        {
+            var group = args[0].Conv<int>();
+            if (!_syncGroups.TryGetValue(group, out var g))
+            {
+                return false;
+            }
+
+            return g.InstanceIds.Any(id => AudioManager.GetAudioInstance(id) != null);
+        }
 
         [GMLFunction("audio_create_stream")]
         public static object? audio_create_stream(object?[] args)
         {
             var filename = args[0].Conv<string>();
-            filename = Path.Combine(Entry.DataWinFolder, filename);
+            // Through the shared resolver rather than a bare Path.Combine: that is what turns a
+            // game's Windows-style backslashes into a real path, and what finds a file whose name
+            // differs only in case (this game asks for musKickIt.ogg and ships musKickit.ogg).
+            filename = Entry.ResolveDataWinPath(filename);
 
             var assetName = Path.GetFileNameWithoutExtension(filename);
             var existingIndex = AssetIndexManager.GetIndex(AssetType.sounds, assetName);
@@ -809,38 +1236,9 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
                 return existingIndex;
             }
 
-            // this should probably be put in AudioManager
-            using var vorbis = Vorbis.FromMemory(File.ReadAllBytes(filename));
-            var data = new float[vorbis.StbVorbis.total_samples * vorbis.Channels];
-            unsafe
-            {
-                fixed (float* ptr = data)
-                {
-                    var realLength = StbVorbis.stb_vorbis_get_samples_float_interleaved(vorbis.StbVorbis, vorbis.Channels, ptr, data.Length);
-                    realLength *= vorbis.Channels;
-                    if (realLength != data.Length)
-                    {
-                        DebugLog.LogWarning($"{filename} length {realLength} != {data.Length}");
-                    }
-                }
-            }
-            var stereo = vorbis.Channels == 2;
-            var freq = vorbis.SampleRate;
-
-            var buffer = AL.GenBuffer();
-            AudioManager.CheckALError();
-            AL.BufferData(buffer, stereo ? ALFormat.StereoFloat32Ext : ALFormat.MonoFloat32Ext, data, freq);
-            AudioManager.CheckALError();
-
-            return AudioManager.RegisterAudioClip(new()
-            {
-                // RegisterAudioClip sets AssetIndex
-                Name = assetName,
-                Clip = buffer,
-                Gain = 1,
-                Pitch = 1,
-                Offset = 0,
-            });
+            // Registered, not decoded: GameMaker streams this off disk, and decoding it to PCM
+            // here is what ran the browser build out of heap. See AudioManager.RegisterStreamedFile.
+            return AudioManager.RegisterStreamedFile(assetName, filename);
         }
 
         [GMLFunction("audio_destroy_stream")]
@@ -851,7 +1249,16 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return null;
         }
 
-        // audio_debug
+        // Real GMS shows a live in-engine audio-graph overlay; this engine has no such overlay to
+        // toggle, so this just flips log verbosity up/down as the closest available substitute for
+        // "give me more insight into what the audio system is doing".
+        [GMLFunction("audio_debug")]
+        public static object? audio_debug(object?[] args)
+        {
+            var enable = args[0].Conv<bool>();
+            DebugLog.Verbosity = enable ? DebugLog.LogType.Verbose : DebugLog.LogType.Info;
+            return null;
+        }
     }
 
     public class RecordingInfo

@@ -2,6 +2,7 @@
 using OpenGM.Loading;
 using OpenGM.Rendering;
 using OpenGM.SerializedFiles;
+using OpenTK.Mathematics;
 
 namespace OpenGM.VirtualMachine.BuiltInFunctions
 {
@@ -81,18 +82,38 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return newLayerId;
         }
 
-        [GMLFunction("layer_destroy", GMLFunctionFlags.Stub)]
+        /// <summary>
+        /// Destroys a layer and everything drawable on it. Used to do nothing at all, which leaves
+        /// the layer's elements on screen forever: tijit engine 2 ships a "Guide" background layer
+        /// -- an 800x608 overlay with a 25%-alpha white cross marking the screen centre, for
+        /// building rooms against -- and destroys it on room start. Ignoring that painted the cross
+        /// over every room of the game.
+        ///
+        /// Instances on the layer are left alone: GameMaker has a separate layer_destroy_instances
+        /// for those, so destroying them here would take out objects a game expects to keep.
+        /// </summary>
+        [GMLFunction("layer_destroy")]
         public static object? layer_destroy(object?[] args)
         {
             var layer_id = args[0];
             var layer = RoomManager.CurrentRoom.GetLayer(layer_id);
 
-            // TODO: implement
+            if (layer == null)
+            {
+                DebugLog.LogWarning($"layer_destroy() - couldn't find {layer_id}");
+                return null;
+            }
 
+            foreach (var element in layer.ElementsToDraw)
+            {
+                DrawManager.Unregister(element);
+            }
+            layer.ElementsToDraw.Clear();
+
+            RoomManager.CurrentRoom.Layers.Remove(layer.ID);
             return null;
         }
 
-        // layer_destroy
         // layer_destroy_instances
         // layer_add_instance
         // layer_has_instance
@@ -1356,11 +1377,11 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
 
             return false;
         }
-        
+
         // tilemap_get_texture
         // tilemap_get_uvs
         // tilemap_get_name
-        
+
         [GMLFunction("tilemap_get_tileset")]
         public static object tilemap_get_tileset(object?[] args)
         {
@@ -2006,6 +2027,382 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
 
         // layer_tile_get_region
         // layer_tile_get_visible
+
+        /// <summary>
+        /// Every <see cref="GMTile"/> in the current room: the pre-GMS2 loose room tiles the legacy
+        /// tile_* functions address, plus any that came in as an asset layer's Tile elements.
+        /// </summary>
+        private static IEnumerable<GMTile> AllTiles()
+        {
+            foreach (var item in RoomManager.CurrentRoom.Tiles)
+            {
+                if (item is GMTile tile)
+                {
+                    yield return tile;
+                }
+            }
+
+            foreach (var layer in RoomManager.CurrentRoom.Layers.Values)
+            {
+                foreach (var element in layer.ElementsToDraw)
+                {
+                    if (element is GMTile tile)
+                    {
+                        yield return tile;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Id of a tile at (x, y) on the tile layer with exactly this depth, or -1 for none.
+        /// Bottom/right edges are exclusive, and the tile's scale counts towards its extent -- the
+        /// post-8.1 behaviour, which is what a GMS game gets (GM 8.0 left the scale out and so
+        /// could never match anything; see OpenGMK's tile_layer_find `use_scaling`).
+        ///
+        /// Continuity's every co-op spike leans on this in its Create event
+        /// (<c>if (tile_layer_find(1000000, x, y)) depth = 100; else depth = 1000002;</c>), so while
+        /// this was unimplemented that event aborted mid-way on the failed call and left the spike
+        /// on its object-default depth instead of either branch's.
+        /// </summary>
+        /// <summary>
+        /// Creates a loose (pre-Studio-style) tile at runtime from a rectangle of a background,
+        /// returning its id. Goes into the room's own loose-tile list, the same place a room's baked
+        /// tiles land, so tile_layer_find and the tile_get_*/tile_set_* family see it too.
+        /// </summary>
+        [GMLFunction("tile_add")]
+        public static object tile_add(object?[] args)
+        {
+            var background = args[0].Conv<int>();
+            var left = args[1].Conv<int>();
+            var top = args[2].Conv<int>();
+            var width = args[3].Conv<int>();
+            var height = args[4].Conv<int>();
+            var x = args[5].Conv<double>();
+            var y = args[6].Conv<double>();
+            var depth = args[7].Conv<double>();
+
+            // Above every id already in the room, so a runtime tile can never be confused for one of
+            // the room's baked tiles (whose ids come from the room file).
+            var id = 10000001;
+            foreach (var existing in AllTiles())
+            {
+                id = Math.Max(id, existing.instanceId + 1);
+            }
+
+            var tile = new GMTile
+            {
+                X = x,
+                Y = y,
+                Definition = background,
+                SpriteMode = false, // tile_add's source is a background; tile_add_sprite's isn't
+                left = left,
+                top = top,
+                width = width,
+                height = height,
+                depth = depth,
+                instanceId = id,
+                XScale = 1,
+                YScale = 1,
+                Color = 0xFFFFFFFF,
+                Visible = true
+            };
+
+            RoomManager.CurrentRoom.Tiles.Add(tile);
+            return id;
+        }
+
+        /// <summary>Exposed for the tile lookups in RemainingGapFunctions.</summary>
+        public static IEnumerable<GMTile> AllTilesPublic() => AllTiles();
+
+        [GMLFunction("tile_exists")]
+        public static object tile_exists(object?[] args)
+        {
+            var id = args[0].Conv<int>();
+            return AllTiles().Any(x => x.instanceId == id);
+        }
+
+        // The rest of the loose-tile family: one accessor per GMTile field, all addressed by the id
+        // tile_add/tile_layer_find hand back. Distinct from the tile_get_index/tile_set_flip/...
+        // group further down, which is GMS2's tilemap API and addresses tile DATA values instead --
+        // same "tile_" prefix, unrelated functions.
+
+        private static GMTile? TileById(object?[] args) =>
+            AllTiles().FirstOrDefault(x => x.instanceId == args[0].Conv<int>());
+
+        [GMLFunction("tile_get_x")]
+        public static object tile_get_x(object?[] args) => TileById(args)?.X ?? 0d;
+
+        [GMLFunction("tile_get_y")]
+        public static object tile_get_y(object?[] args) => TileById(args)?.Y ?? 0d;
+
+        [GMLFunction("tile_get_left")]
+        public static object tile_get_left(object?[] args) => TileById(args)?.left ?? 0;
+
+        [GMLFunction("tile_get_top")]
+        public static object tile_get_top(object?[] args) => TileById(args)?.top ?? 0;
+
+        [GMLFunction("tile_get_width")]
+        public static object tile_get_width(object?[] args) => TileById(args)?.width ?? 0;
+
+        [GMLFunction("tile_get_height")]
+        public static object tile_get_height(object?[] args) => TileById(args)?.height ?? 0;
+
+        [GMLFunction("tile_get_depth")]
+        public static object tile_get_depth(object?[] args) => TileById(args)?.depth ?? 0d;
+
+        [GMLFunction("tile_get_visible")]
+        public static object tile_get_visible(object?[] args) => TileById(args)?.Visible ?? false;
+
+        [GMLFunction("tile_get_xscale")]
+        public static object tile_get_xscale(object?[] args) => TileById(args)?.XScale ?? 0d;
+
+        [GMLFunction("tile_get_yscale")]
+        public static object tile_get_yscale(object?[] args) => TileById(args)?.YScale ?? 0d;
+
+        [GMLFunction("tile_get_background")]
+        public static object tile_get_background(object?[] args) => TileById(args)?.Definition ?? -1;
+
+        [GMLFunction("tile_get_blend")]
+        public static object tile_get_blend(object?[] args) => (int)((TileById(args)?.Color ?? 0xFFFFFFFF) & 0xFFFFFF);
+
+        [GMLFunction("tile_get_alpha")]
+        public static object tile_get_alpha(object?[] args) => ((TileById(args)?.Color ?? 0xFFFFFFFF) >> 24) / 255.0;
+
+        [GMLFunction("tile_set_position")]
+        public static object? tile_set_position(object?[] args)
+        {
+            var tile = TileById(args);
+            if (tile != null)
+            {
+                tile.X = args[1].Conv<double>();
+                tile.Y = args[2].Conv<double>();
+            }
+
+            return null;
+        }
+
+        [GMLFunction("tile_set_region")]
+        public static object? tile_set_region(object?[] args)
+        {
+            var tile = TileById(args);
+            if (tile != null)
+            {
+                tile.left = args[1].Conv<int>();
+                tile.top = args[2].Conv<int>();
+                tile.width = args[3].Conv<int>();
+                tile.height = args[4].Conv<int>();
+            }
+
+            return null;
+        }
+
+        [GMLFunction("tile_set_background")]
+        public static object? tile_set_background(object?[] args)
+        {
+            var tile = TileById(args);
+            if (tile != null)
+            {
+                tile.Definition = args[1].Conv<int>();
+                tile.SpriteMode = false;
+            }
+
+            return null;
+        }
+
+        [GMLFunction("tile_set_visible")]
+        public static object? tile_set_visible(object?[] args)
+        {
+            var tile = TileById(args);
+            if (tile != null)
+            {
+                tile.Visible = args[1].Conv<bool>();
+            }
+
+            return null;
+        }
+
+        [GMLFunction("tile_set_depth")]
+        public static object? tile_set_depth(object?[] args)
+        {
+            var tile = TileById(args);
+            if (tile != null)
+            {
+                tile.depth = args[1].Conv<double>();
+            }
+
+            return null;
+        }
+
+        [GMLFunction("tile_set_scale")]
+        public static object? tile_set_scale(object?[] args)
+        {
+            var tile = TileById(args);
+            if (tile != null)
+            {
+                tile.XScale = args[1].Conv<double>();
+                tile.YScale = args[2].Conv<double>();
+            }
+
+            return null;
+        }
+
+        /// <summary>GMTile.Color is packed ABGR, the same layout image_blend uses.</summary>
+        [GMLFunction("tile_set_blend")]
+        public static object? tile_set_blend(object?[] args)
+        {
+            var tile = TileById(args);
+            if (tile != null)
+            {
+                tile.Color = (tile.Color & 0xFF000000) | ((uint)args[1].Conv<int>() & 0x00FFFFFF);
+            }
+
+            return null;
+        }
+
+        [GMLFunction("tile_set_alpha")]
+        public static object? tile_set_alpha(object?[] args)
+        {
+            var tile = TileById(args);
+            if (tile != null)
+            {
+                var alpha = (uint)Math.Clamp(Math.Round(args[1].Conv<double>() * 255), 0, 255);
+                tile.Color = (tile.Color & 0x00FFFFFF) | (alpha << 24);
+            }
+
+            return null;
+        }
+
+        private static List<GMTile> TilesOnLayer(double depth)
+            => AllTiles().Where(x => x.depth == depth).ToList();
+
+        [GMLFunction("tile_layer_hide")]
+        public static object? tile_layer_hide(object?[] args)
+        {
+            foreach (var tile in TilesOnLayer(args[0].Conv<double>()))
+            {
+                tile.Visible = false;
+            }
+
+            return null;
+        }
+
+        [GMLFunction("tile_layer_show")]
+        public static object? tile_layer_show(object?[] args)
+        {
+            foreach (var tile in TilesOnLayer(args[0].Conv<double>()))
+            {
+                tile.Visible = true;
+            }
+
+            return null;
+        }
+
+        [GMLFunction("tile_layer_delete")]
+        public static object? tile_layer_delete(object?[] args)
+        {
+            foreach (var tile in TilesOnLayer(args[0].Conv<double>()))
+            {
+                tile_delete([tile.instanceId]);
+            }
+
+            return null;
+        }
+
+        [GMLFunction("tile_layer_shift")]
+        public static object? tile_layer_shift(object?[] args)
+        {
+            var depth = args[0].Conv<double>();
+            var x = args[1].Conv<double>();
+            var y = args[2].Conv<double>();
+
+            foreach (var tile in TilesOnLayer(depth))
+            {
+                tile.X += x;
+                tile.Y += y;
+            }
+
+            return null;
+        }
+
+        [GMLFunction("tile_layer_depth")]
+        public static object? tile_layer_depth(object?[] args)
+        {
+            var depth = args[0].Conv<double>();
+            var newDepth = args[1].Conv<double>();
+
+            foreach (var tile in TilesOnLayer(depth))
+            {
+                tile.depth = newDepth;
+            }
+
+            return null;
+        }
+
+        [GMLFunction("tile_layer_delete_at")]
+        public static object? tile_layer_delete_at(object?[] args)
+        {
+            var depth = args[0].Conv<double>();
+            var x = args[1].Conv<double>();
+            var y = args[2].Conv<double>();
+
+            foreach (var tile in TilesOnLayer(depth))
+            {
+                if (x >= tile.X && x < tile.X + (tile.width * tile.XScale)
+                    && y >= tile.Y && y < tile.Y + (tile.height * tile.YScale))
+                {
+                    tile_delete([tile.instanceId]);
+                }
+            }
+
+            return null;
+        }
+
+        [GMLFunction("tile_delete")]
+        public static object? tile_delete(object?[] args)
+        {
+            var id = args[0].Conv<int>();
+
+            var tile = AllTiles().FirstOrDefault(x => x.instanceId == id);
+            if (tile == null)
+            {
+                return null;
+            }
+
+            tile.Destroy(); // unregisters it from DrawManager
+            RoomManager.CurrentRoom.Tiles.Remove(tile);
+
+            foreach (var layer in RoomManager.CurrentRoom.Layers.Values)
+            {
+                layer.ElementsToDraw.Remove(tile);
+            }
+
+            return null;
+        }
+
+        [GMLFunction("tile_layer_find")]
+        public static object tile_layer_find(object?[] args)
+        {
+            var depth = args[0].Conv<double>();
+            var x = args[1].Conv<double>();
+            var y = args[2].Conv<double>();
+
+            foreach (var tile in AllTiles())
+            {
+                if (tile.depth != depth)
+                {
+                    continue;
+                }
+
+                if (x >= tile.X && x < tile.X + (tile.width * tile.XScale)
+                    && y >= tile.Y && y < tile.Y + (tile.height * tile.YScale))
+                {
+                    return tile.instanceId;
+                }
+            }
+
+            return -1;
+        }
 
         [GMLFunction("layer_instance_get_instance")]
         public static object? layer_instance_get_instance(object?[] args)

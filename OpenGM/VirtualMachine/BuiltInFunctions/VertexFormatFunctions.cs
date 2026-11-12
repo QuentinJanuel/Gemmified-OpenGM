@@ -6,6 +6,19 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
     {
         public static VertexFormat? NewFormat;
 
+        /// <summary>
+        /// Every format vertex_format_end has handed out, by the id it returned. A format outlives
+        /// the call that built it because vertex_begin takes one, so it cannot just be discarded at
+        /// vertex_format_end the way it used to be.
+        /// </summary>
+        public static readonly Dictionary<int, VertexFormat> Formats = new();
+
+        /// <summary>
+        /// Ids start at 1, not 0: GML treats 0 as false, and a game storing a format in a variable
+        /// it later tests for truthiness would silently take the "no format" branch.
+        /// </summary>
+        private static int _nextFormatId = 1;
+
         [GMLFunction("vertex_format_begin")]
         public static object? vertex_format_begin(object?[] args)
         {
@@ -18,12 +31,25 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return null;
         }
 
-        // vertex_format_delete
-
-        [GMLFunction("vertex_format_end", GMLFunctionFlags.Stub, stubLogType: DebugLog.LogType.Warning)]
+        [GMLFunction("vertex_format_end")]
         public static object? vertex_format_end(object?[] args)
         {
+            if (NewFormat == null)
+            {
+                DebugLog.LogWarning("vertex_format_end with no format under construction.");
+                return -1;
+            }
+
+            var id = _nextFormatId++;
+            Formats[id] = NewFormat;
             NewFormat = null;
+            return id;
+        }
+
+        [GMLFunction("vertex_format_delete")]
+        public static object? vertex_format_delete(object?[] args)
+        {
+            Formats.Remove(args[0].Conv<int>());
             return null;
         }
 

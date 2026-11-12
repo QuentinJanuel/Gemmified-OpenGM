@@ -5,9 +5,9 @@ using OpenGM.Sequences;
 using OpenGM.SerializedFiles;
 using OpenGM.VirtualMachine;
 using OpenGM.VirtualMachine.BuiltInFunctions;
-using StbImageSharp;
 
 namespace OpenGM.Loading;
+
 public static class GameLoader
 {
     public static bool DebugDumpFunctions = false;
@@ -15,7 +15,7 @@ public static class GameLoader
     private static List<VMCode> _replacementVMCodes = new();
 
     public static GameData GeneralInfo = null!;
-    
+
     public static void LoadGame()
     {
         Console.WriteLine($"Loading game files...");
@@ -45,6 +45,7 @@ public static class GameLoader
             LoadExtensions(reader);
             LoadGlobalInitCode(reader);
             LoadObjects(reader);
+            LoadTimelines(reader);
             LoadBackgrounds(reader);
             LoadRooms(reader);
             LoadSprites(reader);
@@ -171,6 +172,8 @@ public static class GameLoader
         Console.Write($"Loading objects...");
 
         InstanceManager.ObjectDefinitions.Clear();
+        // Both caches are keyed by the ObjectDefinition instances being replaced here.
+        DrawManager.ResetCollisionCaches();
 
         VMCode? GetCodeFromCodeIndex(int codeIndex)
         {
@@ -181,7 +184,7 @@ public static class GameLoader
 
             return GameLoader.Codes[codeIndex];
         }
-        
+
         var length = reader.ReadInt32();
         for (var i = 0; i < length; i++)
         {
@@ -298,7 +301,7 @@ public static class GameLoader
             {
                 item.parent = InstanceManager.ObjectDefinitions[item.FileStorage.ParentID];
             }
-            
+
             item.FileStorage = null!; // not used after here, so let it gc
         }
 
@@ -326,7 +329,7 @@ public static class GameLoader
                     {
                         var uintData = tilemap.Tiles;
                         tilemap.Tiles = null!; // not used after here, so let it gc 
-                        
+
                         tilemap.TilesData = new TileBlob[tilemap.Height, tilemap.Width];
 
                         var cols = tilemap.Height;
@@ -396,11 +399,14 @@ public static class GameLoader
         for (var i = 0; i < length; i++)
         {
             var pageName = reader.ReadString();
+            var pageFormat = reader.ReadByte();
             var blobLength = reader.ReadInt32();
             var blob = reader.ReadBytes(blobLength);
-            
-            var imageResult = ImageResult.FromMemory(blob, ColorComponents.RedGreenBlueAlpha);
-            PageManager.TexturePages.Add(pageName, (imageResult, -1));
+
+            // Handed over still encoded, and decoded one at a time by PageManager.BindTextures --
+            // decoding them all here is what used to run the browser build out of heap on a big
+            // game. See PageManager._pendingPages.
+            PageManager.AddPage(pageName, pageFormat, blob);
         }
 
         Console.WriteLine($" Done!");
@@ -469,6 +475,35 @@ public static class GameLoader
 
             PathManager.Paths.Add(PathManager.HighestPathIndex++, path);
         }
+        Console.WriteLine($" Done!");
+    }
+
+    public static Dictionary<int, Timeline> Timelines = new();
+
+    private static void LoadTimelines(BinaryReader reader)
+    {
+        Console.Write($"Loading timelines...");
+
+        Timelines.Clear();
+
+        var length = reader.ReadInt32();
+        for (var i = 0; i < length; i++)
+        {
+            var asset = reader.ReadMemoryPack<Timeline>();
+
+            foreach (var (step, codeIds) in asset.MomentCodeIDs)
+            {
+                var codes = codeIds.Where(id => id != -1).Select(id => Codes[id]).ToList();
+
+                if (codes.Count > 0)
+                {
+                    asset.Moments[step] = codes;
+                }
+            }
+
+            Timelines[asset.AssetId] = asset;
+        }
+
         Console.WriteLine($" Done!");
     }
 

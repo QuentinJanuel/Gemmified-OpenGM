@@ -6,21 +6,89 @@ namespace OpenGM.VirtualMachine;
 
 public static partial class VMExecutor
 {
+    // Real GM never throws reading past an array's current bound -- it just yields undefined
+    // (mirrors ArraySet's own graceful auto-grow on the write side, and the "variable doesn't
+    // exist" push-undefined handling for missing instance variables elsewhere in this file).
+    private static object? SafeArrayIndex(IList array, int index, string varName)
+    {
+        if (index >= 0 && index < array.Count)
+        {
+            return array[index];
+        }
+
+        // int.MinValue is what casting a NaN double to int lands on, and no real GML index ever
+        // reaches it -- so say what actually happened rather than reporting a nonsense number and
+        // leaving whoever reads the log to work out where it came from.
+        var indexText = index == int.MinValue
+            ? "NaN/undefined (something upstream never got a value)"
+            : index.ToString();
+
+        DebugLog.LogWarning($"Array index {indexText} out of bounds for {varName} (count {array.Count}), pushing undefined.");
+        return null;
+    }
+
+    /// <summary>
+    /// Reads one <c>[array]</c> index out of whatever a variable happens to be holding.
+    ///
+    /// Before 2.3, GML has no separate array type: a variable and element 0 of an array of the same
+    /// name are one and the same storage, so a game may store a single value and read it back as
+    /// <c>v[0]</c>. I Wanna Be The Ocean Princess does that for every input it polls -- its
+    /// scrButtonCheck takes a button and immediately indexes it -- and converting a plain number to
+    /// an IList threw, which aborted the calling event: every step, for every button, in both the
+    /// title menu and the world controller.
+    ///
+    /// See CompatFlags.ScalarIsFirstArrayElement. From 2.3 arrays are a real type and indexing a
+    /// number is a genuine error, so there this still throws rather than inventing an answer.
+    /// </summary>
+    private static void PushArrayElement(object? container, int index, string varName)
+    {
+        if (container is IList list)
+        {
+            Call.Stack.Push(SafeArrayIndex(list, index, varName), VMType.v);
+            return;
+        }
+
+        if (CompatFlags.ScalarIsFirstArrayElement)
+        {
+            if (index != 0)
+            {
+                // Past the end of a one-element array, which reads undefined exactly as
+                // SafeArrayIndex would have.
+                DebugLog.LogWarning(
+                    $"Array index {index} out of bounds for {varName} (a plain value, so count 1), pushing undefined.");
+            }
+
+            Call.Stack.Push(index == 0 ? container : null, VMType.v);
+            return;
+        }
+
+        Call.Stack.Push(SafeArrayIndex(container.Conv<IList>(), index, varName), VMType.v);
+    }
+
     public static void PushGlobal(string varName)
     {
-        Call.Stack.Push(VariableResolver.GlobalVariables[varName], VMType.v);
+        // Real GM leniently treats a never-written global as 0 rather than erroring (this is what
+        // lets code like "if (global.foo) ..." work before anything ever assigns global.foo) --
+        // GMLObject's indexer throws KeyNotFoundException on a genuinely missing key, so this needs
+        // TryGetValue instead of the indexer to get that same lenient default.
+        var value = VariableResolver.GlobalVariables.TryGetValue(varName, out var existing) ? existing : 0;
+        Call.Stack.Push(value, VMType.v);
     }
 
     public static void PushGlobalArrayIndex(string varName, int index)
     {
-        var array = VariableResolver.GlobalVariables[varName].Conv<IList>();
-        Call.Stack.Push(array[index], VMType.v);
+        if (!VariableResolver.GlobalVariables.TryGetValue(varName, out var existing))
+        {
+            Call.Stack.Push(0, VMType.v);
+            return;
+        }
+
+        PushArrayElement(existing, index, varName);
     }
 
     public static void PushLocalArrayIndex(string varName, int index)
     {
-        var array = Call.Locals[varName].Conv<IList>();
-        Call.Stack.Push(array[index], VMType.v);
+        PushArrayElement(Call.Locals[varName], index, varName);
     }
 
     public static void PushLocal(string varName)
@@ -42,7 +110,15 @@ public static partial class VMExecutor
             var value = getter(0);
             Call.Stack.Push(value, VMType.v);
         }
-        else if (VariableResolver.BuiltInSelfVariables.ContainsKey(varName))
+        // The `is GamemakerObject` guard is load-bearing, and the sibling helpers below already
+        // carry it: an INSTANCE builtin only means anything on an instance. A struct's own member
+        // can share a name with one -- `x` and `y` are the obvious pair, and a vec2 struct is built
+        // out of exactly those -- and the compiler emits those names in builtin scope regardless of
+        // what self turns out to be at runtime. Without the guard, `x` inside a struct method ran
+        // the GamemakerObject getter against the struct and died on the cast
+        // (InvalidCastException), taking the calling event with it. tijit engine 2's entire vector
+        // library, its menus and its spike/vine geometry are structs with x/y members.
+        else if (VariableResolver.BuiltInSelfVariables.ContainsKey(varName) && Self.Self is GamemakerObject)
         {
             var getter = VariableResolver.BuiltInSelfVariables[varName].getter;
 
@@ -64,9 +140,27 @@ public static partial class VMExecutor
             var value = Call.Function!.StaticVariables[varName];
             Call.Stack.Push(value, VMType.v);
         }
+        else if (AssetIndexManager.GetIndex(varName) != -1)
+        {
+            // An asset's own name, which the compiler leaves as a runtime name lookup rather than
+            // baking in an index -- room names especially, since `switch (room) case rMenu:` is how
+            // a GMS game branches on where it is.
+            Call.Stack.Push(AssetIndexManager.GetIndex(varName), VMType.v);
+        }
         else
         {
-            throw new NotImplementedException();
+            // A name in builtin scope that resolves to nothing at all. Real GM answers undefined
+            // here rather than failing, and games depend on that: tijit engine 2's getMusic() has
+            // `switch (room) case r00_01menu:` naming a room that no longer exists in the project,
+            // so every room start died on it. Undefined simply never matches the switch, which is
+            // exactly what the game does on Windows.
+            //
+            // Warned about rather than passed over in silence, because the other thing that reaches
+            // here is a builtin variable this engine has never heard of, and that IS a gap worth
+            // seeing. (A builtin it knows but hasn't implemented still throws above, on the null
+            // getter -- that case stays loud.)
+            DebugLog.LogWarning($"Reading unknown builtin variable {varName} - answering undefined.");
+            Call.Stack.Push(null, VMType.v);
         }
     }
 
@@ -92,18 +186,15 @@ public static partial class VMExecutor
                 throw new NotImplementedException($"Built in variable {varName} not implemented.");
             }
 
-            var array = getter(Self.GMSelf).Conv<IList>();
-            Call.Stack.Push(array[index], VMType.v);
+            PushArrayElement(getter(Self.GMSelf), index, varName);
         }
         else if (Self.Self.SelfVariables.ContainsKey(varName))
         {
-            var array = Self.Self.SelfVariables[varName].Conv<IList>();
-            Call.Stack.Push(array[index], VMType.v);
+            PushArrayElement(Self.Self.SelfVariables[varName], index, varName);
         }
         else if (Call.Function!.StaticVariables.ContainsKey(varName))
         {
-            var array = Call.Function!.StaticVariables[varName].Conv<IList>();
-            Call.Stack.Push(array[index], VMType.v);
+            PushArrayElement(Call.Function!.StaticVariables[varName], index, varName);
         }
         else
         {
@@ -165,6 +256,20 @@ public static partial class VMExecutor
         }
     }
 
+    /// <summary>
+    /// The N of <c>argumentN</c>, for the sixteen numbered argument built-ins only -- not bare
+    /// <c>argument</c> (a genuinely indexable array), and not <c>argument_count</c> or
+    /// <c>argument_relative</c>.
+    /// </summary>
+    internal static bool TryGetArgumentIndex(string varName, out int argIndex)
+    {
+        const string prefix = "argument";
+        argIndex = -1;
+        return varName.Length > prefix.Length
+            && varName.StartsWith(prefix, StringComparison.Ordinal)
+            && int.TryParse(varName.AsSpan(prefix.Length), out argIndex);
+    }
+
     public static void PushSelfArrayIndex(IStackContextSelf self, string varName, int index)
     {
         if (index < 0)
@@ -172,7 +277,23 @@ public static partial class VMExecutor
             throw new ArgumentOutOfRangeException($"index into {varName} is negative: {index}");
         }
 
-        IList array;
+        // argumentN is not an indexable built-in the way view_xview[i] is. Its N is baked into the
+        // name, so VariableResolver registers it as `(_) => get_argument(0)` -- a getter that
+        // *discards* the index it is handed. Letting the built-in table answer `argument0[i]` for
+        // it therefore returns the whole of argument 0, silently and with no error: a script doing
+        // `scrGetKeybind(argument0[0])` on an array argument passed the array itself straight
+        // through, and the first builtin downstream that wanted a number died holding it.
+        //
+        // This lands here rather than on the `argument` branch of the caller because GameMaker
+        // tags a script asset's `argument0[i]` as `[array]self.argument0` -- instance type self,
+        // not the argument pseudo-instance -- so the name is the only thing to go on.
+        if (TryGetArgumentIndex(varName, out _))
+        {
+            PushArgumentArrayIndex(varName, index);
+            return;
+        }
+
+        object? container;
 
         if (VariableResolver.BuiltInVariables.TryGetValue(varName, out var bi_gettersetter))
         {
@@ -192,7 +313,7 @@ public static partial class VMExecutor
                 throw new NotImplementedException($"Built in variable {varName} not implemented.");
             }
 
-            array = bis_gettersetter.getter(gm).Conv<IList>();
+            container = bis_gettersetter.getter(gm);
         }
         else
         {
@@ -208,15 +329,10 @@ public static partial class VMExecutor
                 }
             }
 
-            array = self.SelfVariables[varName].Conv<IList>();
+            container = self.SelfVariables[varName];
         }
 
-        if (index >= array.Count)
-        {
-            throw new ArgumentOutOfRangeException($"index into {varName} is bigger than array: {index} array size: {array.Count}");
-        }
-
-        Call.Stack.Push(array[index], VMType.v);
+        PushArrayElement(container, index, varName);
     }
 
     public static void PushArgument(int index)
@@ -240,6 +356,20 @@ public static partial class VMExecutor
 
         if (inst == null)
         {
+            // Real GM: reading a variable through an *object asset* reference (e.g.
+            // "objPlayer.vspeed") when no live instance of that object currently exists just
+            // returns 0 -- no error, no crash. This is a completely normal occurrence (e.g. a
+            // collision event queued against an instance that got destroyed earlier the same
+            // step, like YoYoYo_Engine's water objects reading objPlayer.vspeed right after a
+            // spike killed the player), not a bug, so it shouldn't spam the error log or push
+            // undefined (which crashes the next arithmetic op that touches it) the way a
+            // genuinely-missing instance id would.
+            if (item is int or long or short && (int)item < GMConstants.FIRST_INSTANCE_ID)
+            {
+                Call.Stack.Push(0, VMType.v);
+                return;
+            }
+
             DebugLog.LogError($"Tried to push variable {varName} from {item} ({item?.GetType().Name ?? "null"}), which isn't a valid self!!");
             DebugLog.PrintCallStack(DebugLog.LogType.Error);
             DebugLog.PrintInstances(DebugLog.LogType.Error);
@@ -264,7 +394,10 @@ public static partial class VMExecutor
 
     public static void PushArgumentArrayIndex(string varName, int index)
     {
-        var argIndex = int.Parse(varName.Replace("argument", ""));
+        if (!TryGetArgumentIndex(varName, out var argIndex))
+        {
+            throw new ArgumentException($"{varName} is not a numbered argument", nameof(varName));
+        }
 
         var arguments = Call.Locals["arguments"].Conv<IList>();
 
@@ -274,9 +407,7 @@ public static partial class VMExecutor
             return;
         }
 
-        var array = arguments[argIndex].Conv<IList>();
-
-        Call.Stack.Push(array[index], VMType.v);
+        PushArrayElement(arguments[argIndex], index, varName);
     }
 
     public static void PushStatic(string varname)
@@ -414,7 +545,14 @@ public static partial class VMExecutor
         {
             if (variablePrefix == VariablePrefix.Array)
             {
-                if (variableType == VariableType.Self)
+                // Older (pre-GMS2) bytecode doesn't always tag array-style variable references with
+                // a precise owner context at conversion time (see GameConverter.cs's variable-type
+                // parsing) -- it comes through as a literal "undefined" context, decoded as
+                // VariableType.None, for variables that ARE genuinely self/global/local/builtin/
+                // instance-owned; the actual owner is still correctly resolved at runtime via the
+                // popped instanceId below (same stack shape either way), so None just needs to be
+                // handled exactly like Self rather than as its own separate case.
+                if (variableType == VariableType.Self || variableType == VariableType.None)
                 {
                     var index = Call.Stack.Pop(VMType.i).Conv<int>();
                     var instanceId = Call.Stack.Pop(VMType.i).Conv<int>();
@@ -454,7 +592,7 @@ public static partial class VMExecutor
                         {
                             PushArgumentArrayIndex(variableName, index);
                         }
-                        
+
                         return (ExecutionResult.Success, null);
                     }
                     else if (instanceId == GMConstants.self)
@@ -522,6 +660,21 @@ public static partial class VMExecutor
                         return (ExecutionResult.Success, null);
                     }
                 }
+                else if (variableType == VariableType.BuiltIn)
+                {
+                    // Array-style built-ins with no owning instance (view_xview[0], view_hview[0],
+                    // etc, resolved via VariableResolver.BuiltInVariables) -- same instruction shape
+                    // as the Global/Local array-push cases above (index then a now-unneeded owner
+                    // placeholder), just never routed anywhere before. (Older bytecode that tags
+                    // these as VariableType.None instead is caught by the broadened Self/None branch
+                    // above, since PushSelfArrayIndex already checks BuiltInVariables first
+                    // regardless of which instance context it's given.)
+                    var index = Call.Stack.Pop(VMType.i).Conv<int>();
+                    Call.Stack.Pop(VMType.i);
+
+                    PushBuiltinArrayIndex(variableName, index);
+                    return (ExecutionResult.Success, null);
+                }
             }
             else if (variablePrefix == VariablePrefix.ArrayPopAF)
             {
@@ -539,7 +692,7 @@ public static partial class VMExecutor
                             onlyGrow: true);
 
                         var array = VariableResolver.GlobalVariables[variableName].Conv<IList>();
-                        Call.Stack.Push(array[index], VMType.v);
+                        Call.Stack.Push(SafeArrayIndex(array, index, variableName), VMType.v);
                         return (ExecutionResult.Success, null);
                     }
                     else if (instanceId == GMConstants.local)
@@ -550,7 +703,7 @@ public static partial class VMExecutor
                             onlyGrow: true);
 
                         var array = Call.Locals[variableName].Conv<IList>();
-                        Call.Stack.Push(array[index], VMType.v);
+                        Call.Stack.Push(SafeArrayIndex(array, index, variableName), VMType.v);
                         return (ExecutionResult.Success, null);
                     }
                     else if (instanceId == GMConstants.self)
@@ -562,7 +715,7 @@ public static partial class VMExecutor
                             onlyGrow: true);
 
                         var array = Self.Self.SelfVariables[variableName].Conv<IList>();
-                        Call.Stack.Push(array[index], VMType.v);
+                        Call.Stack.Push(SafeArrayIndex(array, index, variableName), VMType.v);
                         return (ExecutionResult.Success, null);
                     }
                 }
@@ -577,26 +730,26 @@ public static partial class VMExecutor
                     if (instanceId == GMConstants.global)
                     {
                         var array = VariableResolver.GlobalVariables[variableName].Conv<IList>();
-                        Call.Stack.Push(array[index], VMType.v);
+                        Call.Stack.Push(SafeArrayIndex(array, index, variableName), VMType.v);
                         return (ExecutionResult.Success, null);
                     }
                     else if (instanceId == GMConstants.local)
                     {
                         var array = Call.Locals[variableName].Conv<IList>();
-                        Call.Stack.Push(array[index], VMType.v);
+                        Call.Stack.Push(SafeArrayIndex(array, index, variableName), VMType.v);
                         return (ExecutionResult.Success, null);
                     }
                     else if (instanceId == GMConstants.self)
                     {
                         // TODO: check builtin self var
                         var array = Self.Self.SelfVariables[variableName].Conv<IList>();
-                        Call.Stack.Push(array[index], VMType.v);
+                        Call.Stack.Push(SafeArrayIndex(array, index, variableName), VMType.v);
                         return (ExecutionResult.Success, null);
                     }
                     else if (instanceId == GMConstants.stacktop)
                     {
                         var array = FetchSelf(Call.Stack.Pop(VMType.v))!.SelfVariables[variableName].Conv<IList>();
-                        Call.Stack.Push(array[index], VMType.v);
+                        Call.Stack.Push(SafeArrayIndex(array, index, variableName), VMType.v);
                         return (ExecutionResult.Success, null);
                     }
                     else if (instanceId < 0)
@@ -620,7 +773,7 @@ public static partial class VMExecutor
                         }
 
                         var array = inst.SelfVariables[variableName].Conv<IList>();
-                        Call.Stack.Push(array[index], VMType.v);
+                        Call.Stack.Push(SafeArrayIndex(array, index, variableName), VMType.v);
                         return (ExecutionResult.Success, null);
                     }
                 }
@@ -628,7 +781,9 @@ public static partial class VMExecutor
         }
         else if (variablePrefix == VariablePrefix.Stacktop)
         {
-            if (variableType == VariableType.Self)
+            // Same pre-GMS2 "undefined owner context" quirk noted above for the Array prefix --
+            // treat None exactly like Self here too.
+            if (variableType == VariableType.Self || variableType == VariableType.None)
             {
                 var id = Call.Stack.Pop(VMType.i).Conv<int>();
 

@@ -22,7 +22,7 @@ public class StructTests
             
             pushloc.v local.b
             pushloc.v local.a
-            push.i gml_Script_scr_struct
+            push.i [function]gml_Script_scr_struct
             conv.i.v
             call.i @@NewGMLObject@@(argc=3)
             pop.v.v global.c

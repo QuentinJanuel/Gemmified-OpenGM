@@ -3,6 +3,7 @@ using OpenGM.SerializedFiles;
 using OpenTK.Mathematics;
 
 namespace OpenGM;
+
 public static class PathManager
 {
     public static Dictionary<int, CPath> Paths = new();
@@ -22,6 +23,46 @@ public static class PathManager
     public static void PathDelete(int index)
     {
         Paths.Remove(index);
+    }
+
+    /// <summary>
+    /// The centre of the path's bounding box -- the pivot every one of path_rotate/_mirror/_flip/
+    /// _rescale turns around. Note it's the box's centre, not the average of the points, so a path
+    /// with points bunched at one end still pivots about its geometric middle.
+    /// Matches OpenGMK's <c>asset/path.rs</c> <c>center()</c>, GM's own defaults included: with no
+    /// points at all the sentinels leave the centre at (0, 0).
+    /// </summary>
+    public static (double X, double Y) Center(CPath path)
+    {
+        var left = 100000000.0;
+        var right = -100000000.0;
+        var top = 100000000.0;
+        var bottom = -100000000.0;
+
+        foreach (var point in path.points)
+        {
+            left = Math.Min(left, point.x);
+            right = Math.Max(right, point.x);
+            top = Math.Min(top, point.y);
+            bottom = Math.Max(bottom, point.y);
+        }
+
+        return ((left + right) / 2, (top + bottom) / 2);
+    }
+
+    /// <summary>
+    /// Rewrites every control point through <paramref name="transform"/> and rebuilds the
+    /// interpolated points and cached length. Every path transform is this plus its own per-point
+    /// maths -- forgetting the rebuild is what would leave path_get_x reporting the old shape.
+    /// </summary>
+    public static void TransformPoints(CPath path, Func<double, double, (double X, double Y)> transform)
+    {
+        foreach (var point in path.points)
+        {
+            (point.x, point.y) = transform(point.x, point.y);
+        }
+
+        ComputeInternal(path);
     }
 
     public static void AddPoint(CPath path, double x, double y, double speed)
@@ -224,7 +265,7 @@ public static class PathManager
         // easy cases
         if (path.intcount <= 0)
         {
-            return new InternalPoint() { x = 0, y = 0, speed = 0};
+            return new InternalPoint() { x = 0, y = 0, speed = 0 };
         }
 
         if ((path.intcount == 1) || (path.length == 0) || (index <= 0))
@@ -276,6 +317,21 @@ public static class PathManager
         path.length = 0;
     }
 
+    /// <summary>
+    /// Replaces <paramref name="to"/>'s shape with a deep copy of <paramref name="from"/>'s, keeping
+    /// its own name. The points have to be cloned rather than shared: two paths pointing at the same
+    /// PathPoint objects would silently move together under any later path_change_point or transform.
+    /// </summary>
+    public static void CopyInto(CPath to, CPath from)
+    {
+        to.points = from.points.Select(p => new PathPoint { x = p.x, y = p.y, speed = p.speed }).ToList();
+        to.count = to.points.Count;
+        to.kind = from.kind;
+        to.closed = from.closed;
+        to.precision = from.precision;
+        ComputeInternal(to);
+    }
+
     public static void Reverse(CPath path)
     {
         if (path.count <= 1)
@@ -288,23 +344,25 @@ public static class PathManager
 
 public class CPath(string name)
 {
-    string name = name;
+    /// <summary>Public because path_get_name/path_name have to read it.</summary>
+    public string name = name;
 
     public int count = 0;
     public List<PathPoint> points = new();
 
     public int intcount = 0;
     public InternalPoint[] intpoints = null!;
-    
+
     public int kind = 0;
     public bool closed = true;
     public int precision = 4;
-    
+
     public float length;
     public float time;
 
     public double XPosition(double position) => PathManager.GetPosition(this, position).x;
     public double YPosition(double position) => PathManager.GetPosition(this, position).y;
+    public double SpeedPosition(double position) => PathManager.GetPosition(this, position).speed;
 }
 
 public class InternalPoint : PathPoint

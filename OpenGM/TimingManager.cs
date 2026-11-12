@@ -30,7 +30,12 @@ public static class TimingManager
 
     public static void BeginFrame(double dt)
     {
-        DeltaTime = dt;
+        // GML's delta_time is documented (and universally relied upon, e.g. by any GML code that
+        // manually divides it by 1000000 to get seconds) as MICROSECONDS since the last step --
+        // dt here is FrameEventArgs.Time/the wasm step's seconds, so it has to be converted before
+        // being exposed as delta_time (VariableResolver.cs), or any time-based GML math built on
+        // that documented unit silently runs ~1,000,000x slower than intended.
+        DeltaTime = dt * 1_000_000;
 
         if (DebugTime)
         {

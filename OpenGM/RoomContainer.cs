@@ -4,18 +4,27 @@ using OpenGM.SerializedFiles;
 using OpenGM.VirtualMachine;
 
 namespace OpenGM;
+
 public class RoomContainer
 {
     public RoomContainer(Room room)
     {
         RoomAsset = room;
         Persistent = room.Persistent;
+        BackgroundColor = room.BackgroundColor;
+        DrawBackgroundColor = room.DrawBackgroundColor;
     }
 
     public Room RoomAsset;
 
     public int AssetId => RoomAsset.AssetId;
     public bool Persistent;
+
+    // Live, per-room-instance copies (like LayerContainer's own X/Y/VSpeed/etc. below) -- a GML
+    // script setting background_color shouldn't permanently mutate the shared room definition for
+    // every future (re-)load of this room, only this particular time through it.
+    public uint BackgroundColor;
+    public bool DrawBackgroundColor;
     public int SizeX => RoomAsset.SizeX;
     public int SizeY => RoomAsset.SizeY;
     public RuntimeView[] Views = new RuntimeView[8];

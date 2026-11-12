@@ -3,6 +3,7 @@ using OpenGM.SerializedFiles;
 using OpenTK.Mathematics;
 
 namespace OpenGM.Rendering;
+
 public class GMTile : DrawWithDepth
 {
     public double X;
@@ -33,7 +34,7 @@ public class GMTile : DrawWithDepth
             return;
         }
 
-        SpritePageItem sprite; 
+        SpritePageItem sprite;
 
         if (SpriteMode == false)
         {

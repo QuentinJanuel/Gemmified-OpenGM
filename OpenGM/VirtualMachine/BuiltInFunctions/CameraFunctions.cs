@@ -60,10 +60,10 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             }
 
             var cam = CameraManager.CreateCameraView(
-                room_x, room_y, 
-                width, height, 
-                angle, 
-                _object, 
+                room_x, room_y,
+                width, height,
+                angle,
+                _object,
                 x_speed, y_speed,
                 x_border, y_border);
 
@@ -152,7 +152,22 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return null;
         }
 
-        // camera_set_view_angle
+        [GMLFunction("camera_set_view_angle")]
+        public static object? camera_set_view_angle(object?[] args)
+        {
+            var camera_id = args[0].Conv<int>();
+
+            var camera = CameraManager.GetCamera(camera_id);
+            if (camera == null)
+            {
+                return null;
+            }
+
+            camera.ViewAngle = args[1].Conv<float>();
+            camera.Build2DView(camera.ViewX + (camera.ViewWidth / 2), camera.ViewY + (camera.ViewHeight / 2));
+
+            return null;
+        }
 
         [GMLFunction("camera_set_view_target")]
         public static object? camera_set_view_target(object?[] args)
@@ -238,7 +253,19 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         // camera_get_speed_y
         // camera_get_border_x
         // camera_get_border_y
-        // camera_get_view_angle
+        [GMLFunction("camera_get_view_angle")]
+        public static object? camera_get_view_angle(object?[] args)
+        {
+            var camera_id = args[0].Conv<int>();
+
+            var camera = CameraManager.GetCamera(camera_id);
+            if (camera == null)
+            {
+                return -1;
+            }
+
+            return camera.ViewAngle;
+        }
 
         [GMLFunction("camera_get_view_target")]
         public static object? camera_get_view_target(object?[] args)

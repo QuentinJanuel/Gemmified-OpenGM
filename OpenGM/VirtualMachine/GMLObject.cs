@@ -35,55 +35,55 @@ public class GMLObject : IStackContextSelf, IDictionary<string, object?>
         get => SelfVariables[index];
         set => SelfVariables[index] = value;
     }
-    
-    public IEnumerator<KeyValuePair<string, object?>> GetEnumerator() 
+
+    public IEnumerator<KeyValuePair<string, object?>> GetEnumerator()
         => SelfVariables.GetEnumerator();
 
     IEnumerator IEnumerable.GetEnumerator()
         => SelfVariables.GetEnumerator();
 
-    public ICollection<string> Keys 
+    public ICollection<string> Keys
         => SelfVariables.Keys;
 
-    public ICollection<object?> Values 
+    public ICollection<object?> Values
         => SelfVariables.Values;
 
-    public int Count 
+    public int Count
         => SelfVariables.Count;
 
-    public bool IsReadOnly 
+    public bool IsReadOnly
         => false;
 
-    public void Add(string key, object? value) 
+    public void Add(string key, object? value)
         => SelfVariables.Add(key, value);
-        
-    public bool ContainsKey(string key) 
+
+    public bool ContainsKey(string key)
         => SelfVariables.ContainsKey(key);
 
-    public bool Remove(string key) 
+    public bool Remove(string key)
         => SelfVariables.Remove(key);
 
-    public bool TryGetValue(string key, [MaybeNullWhen(false)] out object? value) 
+    public bool TryGetValue(string key, [MaybeNullWhen(false)] out object? value)
         => SelfVariables.TryGetValue(key, out value);
 
-    public object? GetValueOrDefault(string key) 
+    public object? GetValueOrDefault(string key)
         => SelfVariables.GetValueOrDefault(key);
 
-    public object? GetValueOrDefault(string key, object def) 
+    public object? GetValueOrDefault(string key, object def)
         => SelfVariables.GetValueOrDefault(key, def);
 
-    public void Add(KeyValuePair<string, object?> item) 
+    public void Add(KeyValuePair<string, object?> item)
         => SelfVariables.Add(item.Key, item.Value);
 
-    public void Clear() 
+    public void Clear()
         => SelfVariables.Clear();
 
-    public bool Contains(KeyValuePair<string, object?> item) 
+    public bool Contains(KeyValuePair<string, object?> item)
         => SelfVariables.Contains(item);
 
-    public void CopyTo(KeyValuePair<string, object?>[] array, int arrayIndex) 
+    public void CopyTo(KeyValuePair<string, object?>[] array, int arrayIndex)
         => ((ICollection<KeyValuePair<string, object?>>)SelfVariables).CopyTo(array, arrayIndex);
 
-    public bool Remove(KeyValuePair<string, object?> item) 
+    public bool Remove(KeyValuePair<string, object?> item)
         => SelfVariables.Remove(item.Key);
 }

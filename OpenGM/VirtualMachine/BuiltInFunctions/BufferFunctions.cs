@@ -60,6 +60,12 @@
             return buffer.BufferIndex;
         }
 
+        [GMLFunction("buffer_tell")]
+        public static object buffer_tell(object?[] args)
+        {
+            return BufferManager.Buffers[args[0].Conv<int>()].BufferIndex;
+        }
+
         [GMLFunction("buffer_save")]
         public static object? buffer_save(object?[] args)
         {
@@ -132,7 +138,7 @@
 
             return request.Id;
         }
-        
+
         [GMLFunction("buffer_async_group_begin")]
         public static object? buffer_async_group_begin(object?[] args)
         {

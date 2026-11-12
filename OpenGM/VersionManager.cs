@@ -17,7 +17,7 @@ namespace OpenGM
                 (int)GameLoader.GeneralInfo.Release,
                 (int)GameLoader.GeneralInfo.Build
             );
-            
+
             CompatFlags.Init();
         }
     }

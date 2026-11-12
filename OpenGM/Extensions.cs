@@ -64,7 +64,27 @@ public static class Extensions
     }
 
     // sometimes things use \r\n, sometimes they use \n
-    public static string[] SplitLines(this string @this) => @this.Replace("\r\n", "\n").Split('\n');
+    //
+    // A trailing separator (a string ending in \n, or -- via CompatFlags.ApplyHashNewlines -- a
+    // trailing #) must NOT count as an extra, invisible blank final line: .NET's Split('\n') gives
+    // "A\n".Split('\n') == ["A", ""], but real GM's own line iteration (confirmed against
+    // OpenGMK's LineIterator, gm8emulator/src/game/draw.rs) stops once it's consumed the string and
+    // never manufactures a line for "whatever comes after the last separator" when that's nothing --
+    // reserving vertical space (string_height, draw_text's own line spacing) for a line nothing
+    // actually occupies. Only the single trailing empty entry is dropped -- a real intentional blank
+    // line elsewhere (or even a genuine blank line right before the end, from two consecutive
+    // separators) is untouched.
+    public static string[] SplitLines(this string @this)
+    {
+        var lines = @this.Replace("\r\n", "\n").Split('\n');
+
+        if (lines.Length > 1 && lines[^1].Length == 0)
+        {
+            return lines[..^1];
+        }
+
+        return lines;
+    }
 
     public static T ReadMemoryPack<T>(this BinaryReader @this)
     {
@@ -81,7 +101,7 @@ public static class Extensions
     }
 
     // https://stackoverflow.com/a/1262619/17543401
-    private static Random rng = new();  
+    private static Random rng = new();
     public static void Shuffle<T>(this IList<T> list)
     {
         var n = list.Count;

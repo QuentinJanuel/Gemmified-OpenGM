@@ -1,0 +1,56 @@
+name: Build the plugin
+description: Installs the toolchains, then builds and packages the plugin. Optionally checks it first.
+
+inputs:
+  checks:
+    description: Run the format check and the tests before building.
+    default: "false"
+  version:
+    description: Build as this version. The package.json change is not committed.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: pnpm/action-setup@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        cache: pnpm
+    - run: pnpm install --frozen-lockfile
+      shell: bash
+
+    - name: Set the version
+      if: inputs.version != ''
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: npm pkg set version="$VERSION"
+
+    # Installed under the runner's temp directory, which the runner user owns, so the workload
+    # install below needs no sudo.
+    - uses: actions/setup-dotnet@v4
+      env:
+        DOTNET_INSTALL_DIR: ${{ runner.temp }}/dotnet
+      with:
+        dotnet-version: "10.0.x"
+    - uses: actions/cache@v4
+      with:
+        path: ~/.nuget/packages
+        key: nuget-${{ runner.os }}-net10-${{ hashFiles('**/*.csproj') }}
+        restore-keys: nuget-${{ runner.os }}-net10-
+    # OpenGM.Wasm targets browser-wasm: even restoring it needs this workload, and its AOT publish
+    # needs the Emscripten toolchain the workload brings.
+    - run: dotnet workload install wasm-tools
+      shell: bash
+
+    - if: inputs.checks == 'true'
+      shell: bash
+      run: |
+        pnpm run format:check
+        pnpm run test
+
+    - shell: bash
+      run: |
+        pnpm run build
+        pnpm run package

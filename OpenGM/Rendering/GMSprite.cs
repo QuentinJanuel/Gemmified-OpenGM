@@ -2,6 +2,7 @@
 using UndertaleModLib.Models;
 
 namespace OpenGM.Rendering;
+
 public class GMSprite : DrawWithDepth
 {
     public int Definition;

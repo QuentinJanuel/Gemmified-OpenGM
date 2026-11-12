@@ -2,10 +2,15 @@
 using System.Numerics;
 
 namespace OpenGM;
+
 public static class CustomMath
 {
-    public const double Rad2Deg = 57.2957795131;
-    public const double Deg2Rad = 0.01745329251;
+    // Computed rather than written out: both were literals truncated at 11 decimals, ~1e-11 off the
+    // real value. That survives into everything angle-based, and grows -- a degrees->radians error
+    // comes back out of sin/cos scaled by whatever length it's applied to, so a quarter-turned 32px
+    // sprite edge landed ~1e-7 away from the whole pixel it belongs on.
+    public const double Rad2Deg = 180.0 / Math.PI;
+    public const double Deg2Rad = Math.PI / 180.0;
 
     public static double Epsilon = 0.00001; // not const, as this value can be changed
 
@@ -54,7 +59,9 @@ public static class CustomMath
         return value.Equals(0) ? 1 : TNumber.Sign(value);
     }
 
-    public static bool ApproxEqual(double a, double b) => Math.Abs(a - b) <= Epsilon;
+    // `a == b` first, because the subtraction cannot answer for infinities: inf - inf is NaN, and
+    // every comparison against NaN is false, so two equal infinities would read as different.
+    public static bool ApproxEqual(double a, double b) => a == b || Math.Abs(a - b) <= Epsilon;
 
     public static bool ApproxGreaterThan(double a, double b) => a > b + Epsilon;
     public static bool ApproxGreaterThanEqual(double a, double b) => ApproxEqual(a, b) || ApproxGreaterThan(a, b);
@@ -65,7 +72,7 @@ public static class CustomMath
     public static double Mod(double a, double b)
     {
         // % is actually remainder in C/C#, and will return a negative number
-        
+
         /*
          * Remainder and Modulus have the same value for positive values.
          * % in C# is NOT modulo - it's remainder.
@@ -80,7 +87,7 @@ public static class CustomMath
          * 10 MOD -3 = -2
          * -10 MOD -3 = -1
          */
-        
+
         return ((a % b) + b) % b;
     }
 

@@ -1,6 +1,7 @@
 ﻿using OpenTK.Mathematics;
 
 namespace OpenGM.IO;
+
 public class AudioListener
 {
     public int ID;

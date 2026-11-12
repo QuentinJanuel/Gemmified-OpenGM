@@ -16,16 +16,24 @@ public partial class Room
     public float GravityX;
     public float GravityY;
 
+    // The real per-room frame rate for every GameMaker version (GEN8's GMS2FPS is a GMS2-only
+    // addition UndertaleModLib defaults to 30 when a pre-GMS2 file doesn't declare it -- not this
+    // game's actual speed). Applied fresh on every room load in RoomManager.ChangeToWaitingRoom,
+    // matching OpenGMK's game.rs (self.room.speed = room.speed in load_room).
+    public int Speed = 30;
+
     public View[] Views = new View[8];
 
     public List<Layer> Layers = new();
     public List<GameObject> GameObjects = new();
     public List<Tile> Tiles = new();
     public List<OldBackground> OldBackgrounds = new();
-    
+
     public bool EnableViews;
 
-    // show color
+    public uint BackgroundColor;
+    public bool DrawBackgroundColor = true;
+
     // view clear screen? what is this?
     // clear display buffer
 }
@@ -236,7 +244,7 @@ public class TileBlob
         Rotate = (blobData & (1 << 30)) != 0;
     }
 
-    public int ToNumber() 
+    public int ToNumber()
     {
         var result = 0;
         result |= TileIndex;

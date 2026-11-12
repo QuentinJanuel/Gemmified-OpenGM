@@ -30,7 +30,7 @@ public class GMBackground : DrawWithDepth
             var x2 = GraphicsManager.ViewArea.X + GraphicsManager.ViewArea.Z;
             var y1 = GraphicsManager.ViewArea.Y;
             var y2 = GraphicsManager.ViewArea.Y + GraphicsManager.ViewArea.W;
-            
+
             CustomWindow.Draw(new GMPolygonJob()
             {
                 Colors = [color, color, color, color],
@@ -55,7 +55,7 @@ public class GMBackground : DrawWithDepth
         // TODO : account for stretch
         // TODO : work out what foreground does
         // TODO : account for animations
-        
+
         // TODO : use GR_Texture_Draw_Tiled guy
 
         var sprite = SpriteManager.GetSpritePageItem(Element.Index, FrameIndex);
@@ -93,7 +93,7 @@ public class GMBackground : DrawWithDepth
                 layerY -= sprite.BoundingHeight;
             }
         }
-        
+
         do
         {
             do

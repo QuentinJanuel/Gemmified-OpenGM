@@ -6,6 +6,30 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
 {
     public static class MiscFunctions
     {
+        // Real async HTTP networking (request/response via the Async - HTTP event) isn't
+        // implemented -- registered as a safe stub so a script that calls it (e.g. an update
+        // checker) doesn't abort entirely partway through, same reasoning as any other stubbed
+        // extension function. -1 matches the real function's own "request failed to start" return
+        // value, so code checking the result before using it stays safe.
+        [GMLFunction("http_get", GMLFunctionFlags.Stub)]
+        public static object? http_get(object?[] args) => -1;
+
+        // See SpriteManager.screen_save_part's own doc comment -- captures pixels into an in-memory
+        // cache rather than actually encoding and writing a PNG (no encoder is wired up, only
+        // StbImageSharp's decoder), which sprite_add checks before touching disk.
+        [GMLFunction("screen_save_part")]
+        public static object? screen_save_part(object?[] args)
+        {
+            var fname = args[0].Conv<string>();
+            var x = args[1].Conv<int>();
+            var y = args[2].Conv<int>();
+            var w = args[3].Conv<int>();
+            var h = args[4].Conv<int>();
+
+            SpriteManager.screen_save_part(Entry.ResolveDataWinPath(fname), x, y, w, h);
+            return null;
+        }
+
         [GMLFunction("event_inherited")]
         public static object? event_inherited(object?[] args)
         {
@@ -28,6 +52,28 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return null;
         }
 
+        /// <summary>
+        /// Runs an event on self, but looked up on ANOTHER object's definition -- i.e. borrow that
+        /// object's handler and run it with self as the instance. Note the event still runs on self;
+        /// the object argument only decides whose code is found.
+        /// </summary>
+        [GMLFunction("event_perform_object")]
+        public static object? event_perform_object(object?[] args)
+        {
+            var obj = args[0].Conv<int>();
+            var type = args[1].Conv<int>();
+            var numb = args[2].Conv<int>();
+
+            if (!InstanceManager.ObjectDefinitions.TryGetValue(obj, out var definition))
+            {
+                DebugLog.LogError($"event_perform_object called with a non-existent object index {obj}");
+                return null;
+            }
+
+            GamemakerObject.ExecuteEvent(VMExecutor.Self.GMSelf, definition, (EventType)type + 1, numb);
+            return null;
+        }
+
         // event_perform_async
 
         [GMLFunction("event_user")]
@@ -47,6 +93,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         [GMLFunction("window_handle")]
         public static object? window_handle(object?[] args)
         {
+#if !BROWSER
             if (OperatingSystem.IsWindows())
             {
                 unsafe
@@ -55,7 +102,8 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
                     return (long)OpenTK.Windowing.GraphicsLibraryFramework.GLFW.GetWin32Window(CustomWindow.Instance.WindowPtr);
                 }
             }
-            
+#endif
+
             DebugLog.LogWarning("window_handle not implemented for current platform.");
             return null;
         }
@@ -67,16 +115,32 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         {
             if (args.Length == 0)
             {
-                DebugLog.Log("undefined");
+                DebugLog.LogUser("undefined");
                 return null;
             }
 
-            DebugLog.Log((string)MathFunctions.@string(args[0]));
+            DebugLog.LogUser((string)MathFunctions.@string(args[0]));
             return null;
         }
 
         // show_debug_overlay
         // debug_event
+
+        [GMLFunction("show_error")]
+        public static object? show_error(object?[] args)
+        {
+            var message = args[0].Conv<string>();
+            var abort = args[1].Conv<bool>();
+
+            DebugLog.LogError(message);
+
+            if (abort)
+            {
+                RoomManager.EndGame();
+            }
+
+            return null;
+        }
         // debug_get_callstack
 
         // gif_add_surface
@@ -94,7 +158,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return null;
         }
 
-         [GMLFunction("alarm_get")]
+        [GMLFunction("alarm_get")]
         public static object? alarm_get(object?[] args)
         {
             var index = args[0].Conv<int>();
@@ -289,7 +353,7 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
                 if (instance == null)
                 {
                     DebugLog.LogError($"No instance of id {instanceId}");
-	                return null;
+                    return null;
                 }
 
                 if (VariableResolver.BuiltInSelfVariables.TryGetValue(name, out var getset))
@@ -329,7 +393,13 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
             return varNames;
         }
 
-        // variable_struct_names_count
+        [GMLFunction("struct_names_count")]
+        [GMLFunction("variable_struct_names_count")]
+        public static object? variable_struct_names_count(object?[] args)
+        {
+            return args[0].Conv<GMLObject>().SelfVariables.Count;
+        }
+
         // variable_struct_remove
         // gc_collect
         // gc_enable
@@ -341,189 +411,27 @@ namespace OpenGM.VirtualMachine.BuiltInFunctions
         // clipboard_set_text
         // clipboard_get_text
 
-        // basically copied from https://github.com/YoYoGames/GameMaker-HTML5/blob/965f410a6553dd8e2418006ebeda5a86bd55dba2/scripts/functions/Function_Date.js
-        const double MILLISECONDS_IN_A_DAY = 86400000.0;
-        const double DAYS_SINCE_1900 = 25569;
-        private static readonly int[] monthlen = new[] { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-
-        private static double FromGMDateTime(double dateTime) => dateTime < DAYS_SINCE_1900
-            ? dateTime * MILLISECONDS_IN_A_DAY
-            : (dateTime - DAYS_SINCE_1900) * MILLISECONDS_IN_A_DAY;
-
-        private static int DayOfYear(Date d)
+        [GMLFunction("url_open", GMLFunctionFlags.Stub)]
+        [GMLFunction("url_open_ext", GMLFunctionFlags.Stub)]
+        [GMLFunction("url_open_full", GMLFunctionFlags.Stub)]
+        public static object? url_open(object?[] args)
         {
-            var day = 0;
-            if (_useLocalTime)
-            {
-                var monthlens = GetMonthLengths(d.GetFullYear());
-                for (var i = 0; i < d.GetMonth(); i++)
-                    day += monthlens[i];
-                day += d.GetDate();
-            }
-            else
-            {
-                var monthlens = GetMonthLengths(d.GetUTCFullYear());
-                for (var i = 0; i < d.GetUTCMonth(); i++)
-                    day += monthlens[i];
-                day += d.GetUTCDate();
-            }
+            var url = args[0].Conv<string>();
 
-            return day;
+            // Registered rather than implemented on purpose: the engine runs in a Web Worker, which
+            // can't open a window itself, so this would need a whole new worker -> main thread
+            // bridge. Not worth that for what games use it for (a credits link), and an unresolved
+            // call would take the rest of the event with it.
+            DebugLog.LogWarning($"url_open({url}) ignored -- opening a URL isn't wired up.");
+            return null;
         }
 
-        private static int[] GetMonthLengths(int year)
-        {
-            var monthLengths = monthlen.ToArray(); // copy array
-            if (IsLeapYear(year))
-            {
-                monthLengths[1] = 29;
-            }
-            return monthLengths;
-        }
-
-        private static bool IsLeapYear(int year)
-        {
-            return year % 400 == 0 || (year % 100 != 0 && year % 4 == 0);
-        }
-
-        private static bool _useLocalTime = false;
-
-        [GMLFunction("date_current_datetime")]
-        public static object date_current_datetime(object?[] args)
-        {
-            var dt = new Date();
-            var mm = dt.GetMilliseconds();
-            var t = dt.GetTime() - mm;
-            return (t / MILLISECONDS_IN_A_DAY) + DAYS_SINCE_1900;
-        }
-
-        // date_create_datetime
-        // date_valid_datetime
-        // date_inc_year
-        // date_inc_month
-        // date_inc_week
-        // date_inc_day
-        // date_inc_hour
-        // date_inc_minute
-        // date_inc_second
-
-        [GMLFunction("date_get_year")]
-        public static object date_get_year(object?[] args)
-        {
-            var time = args[0].Conv<double>();
-            var d = new Date();
-            d.SetTime(FromGMDateTime(time));
-
-            return _useLocalTime ? d.GetFullYear() : d.GetUTCFullYear();
-        }
-
-        [GMLFunction("date_get_month")]
-        public static object date_get_month(object?[] args)
-        {
-            var time = args[0].Conv<double>();
-            var d = new Date();
-            d.SetTime(FromGMDateTime(time));
-
-            return _useLocalTime ? d.GetMonth() + 1 : d.GetUTCMonth() + 1;
-        }
-
-        [GMLFunction("date_get_week")]
-        public static object date_get_week(object?[] args)
-        {
-            var time = args[0].Conv<double>();
-            var d = new Date();
-            d.SetTime(FromGMDateTime(time));
-
-            var w = DayOfYear(d);
-            return CustomMath.FloorToInt(w / 7.0);
-        }
-
-        [GMLFunction("date_get_day")]
-        public static object date_get_day(object?[] args)
-        {
-            var time = args[0].Conv<double>();
-            var d = new Date();
-            d.SetTime(FromGMDateTime(time));
-
-            return _useLocalTime ? d.GetDate() : d.GetUTCDate();
-        }
-
-        [GMLFunction("date_get_hour")]
-        public static object date_get_hour(object?[] args)
-        {
-            var time = args[0].Conv<double>();
-            var d = new Date();
-            d.SetTime(FromGMDateTime(time));
-
-            return _useLocalTime ? d.GetHours() : d.GetUTCHours();
-        }
-
-        [GMLFunction("date_get_minute")]
-        public static object date_get_minute(object?[] args)
-        {
-            var time = args[0].Conv<double>();
-            var d = new Date();
-            d.SetTime(FromGMDateTime(time));
-
-            return _useLocalTime ? d.GetMinutes() : d.GetUTCMinutes();
-        }
-
-        [GMLFunction("date_get_second")]
-        public static object date_get_second(object?[] args)
-        {
-            var time = args[0].Conv<double>();
-            var d = new Date();
-            d.SetTime(FromGMDateTime(time));
-
-            return _useLocalTime ? d.GetSeconds() : d.GetUTCSeconds();
-        }
-
-        [GMLFunction("date_get_weekday")]
-        public static object date_get_weekday(object?[] args)
-        {
-            var time = args[0].Conv<double>();
-            var d = new Date();
-            d.SetTime(FromGMDateTime(time));
-
-            return _useLocalTime ? d.GetDay() : d.GetUTCDay();
-        }
-
-        // date_get_day_of_year
-        // date_get_hour_of_year
-        // date_get_minute_of_year
-        // date_get_second_of_year
-        // date_year_span
-        // date_month_span
-        // date_week_span
-        // date_day_span
-        // date_hour_span
-        // date_minute_span
-        // date_second_span
-        // date_compare_datetime
-        // date_compare_date
-        // date_compare_time
-        // date_date_of
-        // date_time_of
-        
-        [GMLFunction("date_datetime_string")]
-        public static object date_datetime_string(object?[] args)
-        {
-            // no idea if this is right lol
-            var time = args[0].Conv<double>();
-            var d = new Date();
-            d.SetTime(FromGMDateTime(time));
-
-            return d.ToString()!;
-        }
-
-        // date_date_string
-        // date_time_string
-        // date_days_in_month
-        // date_days_in_year
-        // date_leap_year
-        // date_is_today
-        // date_set_timezone
-        // date_get_timezone
+        // The whole date/time family lives in DateFunctions.cs. It used to be here, built on a
+        // hand-rolled JS-Date lookalike (Date.cs) whose own header called itself lazy and asked to
+        // be removed; date_datetime_string returned that class's *type name*, and date_get_week
+        // returned day_of_year/7 rather than an ISO week number.
+        // date_set_timezone / date_get_timezone are still unimplemented -- GM only offers UTC vs
+        // local, and everything here reads local time already.
         // game_set_speed
 
         [GMLFunction("game_get_speed")]

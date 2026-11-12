@@ -24,9 +24,37 @@ public partial class SpriteData
     public float PlaybackSpeed;
     public AnimSpeedType PlaybackSpeedType;
 
+    /// <summary>
+    /// Nine-slice setup, or null for the great majority of sprites that have none. See
+    /// <see cref="NineSliceData"/>.
+    /// </summary>
+    public NineSliceData? NineSlice;
+
     [MemoryPackIgnore] public Vector2i Origin => new(OriginX, OriginY);
 
     [MemoryPackIgnore] public Vector4i Margins => new(MarginLeft, MarginRight, MarginBottom, MarginTop);
+}
+
+/// <summary>
+/// A sprite's nine-slice setup: the four margins carve it into nine regions, and each region gets
+/// its own behaviour when the sprite is drawn at a size other than its own. GameMaker applies this
+/// instead of plain stretching whenever it is enabled, which is the whole point of it -- a UI box
+/// keeps its corners crisp and a repeating strip repeats rather than smearing.
+/// </summary>
+[MemoryPackable]
+public partial class NineSliceData
+{
+    public bool Enabled;
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+
+    /// <summary>
+    /// Per-region behaviour, in GameMaker's own order: left edge, top edge, right edge, bottom
+    /// edge, centre. Values are <see cref="UndertaleSprite.NineSlice.TileMode"/>.
+    /// </summary>
+    public int[] TileModes = new int[5];
 }
 
 [MemoryPackable]

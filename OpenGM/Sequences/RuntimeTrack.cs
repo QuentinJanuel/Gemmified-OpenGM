@@ -1,6 +1,6 @@
-﻿using OpenGM.VirtualMachine;
+﻿using OpenGM.SerializedFiles;
+using OpenGM.VirtualMachine;
 using System.Collections;
-using OpenGM.SerializedFiles;
 
 namespace OpenGM.Sequences;
 
