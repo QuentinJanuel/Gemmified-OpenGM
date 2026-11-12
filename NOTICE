@@ -18,7 +18,7 @@ Third-party components
 UndertaleModTool <https://github.com/UnderminersTeam/UndertaleModTool>, by the
 Underminers team and contributors, is included as a git submodule
 (UndertaleModTool/) pointing at the fork
-<https://github.com/QuentinJanuel/UndertaleModTool>, branch gemmified. It is
+<https://github.com/QuentinJanuel/UndertaleModTool>, branch downstream. It is
 licensed GPL-3.0; see UndertaleModTool/LICENSE.txt. OpenGM and OpenGM.Wasm
 build against its UndertaleModLib project.
 
