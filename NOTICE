@@ -25,3 +25,4 @@ build against its UndertaleModLib project.
 Underanalyzer <https://github.com/UnderminersTeam/Underanalyzer> is a submodule
 of UndertaleModTool, at the commit UndertaleModTool pins. It is licensed
 MPL-2.0; see UndertaleModTool/Underanalyzer/LICENSE.
+
