@@ -16,6 +16,15 @@ const manifest = {
     "Runs GameMaker Studio 1 and 2 games in the browser, on a WebAssembly build of OpenGM, a reimplementation of the GameMaker runner in C#.",
   author: "Dapper Mink",
   updates: "https://gemmified-opengm.dappermink.me/latest.json",
+  credits: [
+    {
+      name: "OpenGM",
+      license: "MIT",
+      url: "https://github.com/QuentinJanuel/Gemmified-OpenGM",
+      copyright: "Copyright (c) 2024-2025 _nebula, JohnCorby, TaiAurori",
+      upstream: "https://github.com/misternebula/OpenGM",
+    },
+  ],
   capabilities: plugin.capabilities,
 };
 
